@@ -28,4 +28,10 @@ All code is self-contained in one HTML file with three sections:
 
 ## Git Workflow
 
-After every change: commit with a clean descriptive message and push to GitHub immediately. The remote is `https://github.com/edwardenag-tech/Claude---Eddie-G.git`.
+**This is a hard requirement for every task:** after completing any piece of work — a new feature, a bug fix, a rename, any meaningful change — stage the relevant files, write a clean descriptive commit message, and push to GitHub before considering the task done. Never leave work uncommitted or unpushed.
+
+This ensures there is always a saved version on GitHub and any state can be reverted at any time.
+
+- Remote: `https://github.com/edwardenag-tech/Claude---Eddie-G.git`
+- Branch: `main`
+- Commit message format: short imperative summary (e.g. "Add win animation to board cells")
