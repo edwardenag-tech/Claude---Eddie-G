@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Alert Capital — Fact Finder</title>
+<!-- EmailJS: sends the form directly to marcus@alertloans.com.au -->
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+<!-- html2pdf: generates a PDF in the browser -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -32,6 +36,29 @@
     line-height: 1.5;
   }
 
+  /* ── SETUP BANNER ── */
+  #setup-banner {
+    background: #fff3cd;
+    border-bottom: 2px solid #ffc107;
+    padding: 14px 32px;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  #setup-banner .setup-icon { font-size: 20px; flex-shrink: 0; margin-top: 2px; }
+  #setup-banner h3 { font-size: 13px; font-weight: 700; color: #856404; margin-bottom: 4px; }
+  #setup-banner p { font-size: 12px; color: #856404; line-height: 1.5; }
+  #setup-banner a { color: #c0392b; font-weight: 600; }
+  #setup-banner ol { margin: 6px 0 0 16px; font-size: 12px; color: #856404; }
+  #setup-banner ol li { margin-bottom: 2px; }
+  #setup-banner code {
+    background: rgba(0,0,0,0.08);
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 11px;
+    font-family: monospace;
+  }
+
   /* ── HEADER ── */
   header {
     background: var(--dark);
@@ -42,40 +69,21 @@
     justify-content: space-between;
     gap: 16px;
   }
-  .logo {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
+  .logo { display: flex; align-items: center; gap: 12px; }
   .logo-icon {
-    width: 42px;
-    height: 42px;
+    width: 42px; height: 42px;
     background: var(--red);
     border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 900;
-    font-size: 20px;
-    color: white;
-    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 900; font-size: 20px; color: white; flex-shrink: 0;
   }
   .logo-text { line-height: 1.2; }
   .logo-text strong { font-size: 18px; display: block; }
   .logo-text span { font-size: 11px; opacity: 0.7; letter-spacing: 0.08em; text-transform: uppercase; }
-  header h1 {
-    font-size: 15px;
-    font-weight: 600;
-    opacity: 0.9;
-    text-align: right;
-  }
+  header h1 { font-size: 15px; font-weight: 600; opacity: 0.9; text-align: right; }
 
   /* ── MAIN LAYOUT ── */
-  main {
-    max-width: 960px;
-    margin: 32px auto;
-    padding: 0 16px 80px;
-  }
+  main { max-width: 960px; margin: 32px auto; padding: 0 16px 80px; }
 
   /* ── SECTION ── */
   .section {
@@ -89,128 +97,75 @@
     background: var(--dark);
     color: white;
     padding: 14px 20px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
+    display: flex; align-items: center; gap: 12px;
   }
   .section-num {
-    width: 28px;
-    height: 28px;
+    width: 28px; height: 28px;
     background: var(--red);
     border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    font-size: 13px;
-    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; flex-shrink: 0;
   }
   .section-header h2 { font-size: 14px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
   .section-body { padding: 20px; }
 
   /* ── APPLICANT COLUMNS ── */
-  .applicant-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-  }
-  @media (max-width: 640px) {
-    .applicant-grid { grid-template-columns: 1fr; }
-  }
+  .applicant-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 640px) { .applicant-grid { grid-template-columns: 1fr; } }
   .applicant-col {
     background: var(--section-bg);
     border-radius: 8px;
     padding: 16px;
     border: 1px solid var(--border);
   }
-  .applicant-label {
-    font-size: 12px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--mid);
-    margin-bottom: 12px;
-  }
+  .applicant-label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--mid); margin-bottom: 12px; }
 
   /* ── FORM FIELDS ── */
   .field { margin-bottom: 12px; }
   .field label {
     display: block;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--mid);
-    margin-bottom: 4px;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--mid); margin-bottom: 4px;
   }
   .field input[type="text"],
   .field input[type="email"],
   .field input[type="tel"],
   .field input[type="number"],
   .field input[type="date"],
-  .field select,
-  .field textarea {
+  .field select, .field textarea {
     width: 100%;
     padding: 8px 10px;
     border: 1.5px solid var(--border);
     border-radius: 6px;
-    font-family: var(--font);
-    font-size: 13px;
-    background: var(--input-bg);
-    color: var(--dark);
-    transition: border-color 0.15s;
-    outline: none;
+    font-family: var(--font); font-size: 13px;
+    background: var(--input-bg); color: var(--dark);
+    transition: border-color 0.15s; outline: none;
   }
-  .field input:focus,
-  .field select:focus,
-  .field textarea:focus {
-    border-color: var(--red);
-  }
-
-  .field-row {
-    display: grid;
-    gap: 8px;
-  }
+  .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--red); }
+  .field-row { display: grid; gap: 8px; }
   .field-row.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
   .field-row.cols-2 { grid-template-columns: 1fr 1fr; }
 
   /* ── PILL BUTTONS ── */
-  .pill-group {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 4px;
-  }
+  .pill-group { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
   .pill-group input[type="radio"] { display: none; }
   .pill-group label {
     padding: 6px 14px;
     border-radius: 20px;
-    background: var(--pill-inactive);
-    color: var(--pill-inactive-text);
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    border: 1.5px solid transparent;
+    background: var(--pill-inactive); color: var(--pill-inactive-text);
+    font-size: 12px; font-weight: 600;
+    cursor: pointer; border: 1.5px solid transparent;
     transition: all 0.15s;
-    text-transform: none;
-    letter-spacing: 0;
-    margin-bottom: 0;
-    display: inline-flex;
-    align-items: center;
+    text-transform: none; letter-spacing: 0; margin-bottom: 0;
+    display: inline-flex; align-items: center;
   }
   .pill-group input[type="radio"]:checked + label {
-    background: var(--pill-active);
-    color: var(--pill-active-text);
-    border-color: var(--red);
+    background: var(--pill-active); color: var(--pill-active-text); border-color: var(--red);
   }
 
   /* ── DEPENDANTS ── */
-  .dep-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 8px;
-    margin-top: 4px;
-  }
+  .dep-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 4px; }
 
   /* ── PREVIOUS ADDRESS TOGGLE ── */
   .prev-address { display: none; }
@@ -218,195 +173,189 @@
 
   /* ── TABLES ── */
   .table-wrap { overflow-x: auto; margin-top: 8px; }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
   table th {
-    background: var(--section-bg);
-    color: var(--mid);
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 8px 10px;
-    text-align: left;
-    border: 1px solid var(--border);
-    white-space: nowrap;
+    background: var(--section-bg); color: var(--mid);
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 8px 10px; text-align: left;
+    border: 1px solid var(--border); white-space: nowrap;
   }
-  table td {
-    border: 1px solid var(--border);
-    padding: 4px 6px;
-    vertical-align: middle;
-  }
+  table td { border: 1px solid var(--border); padding: 4px 6px; vertical-align: middle; }
   table td.row-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--mid);
-    background: var(--section-bg);
-    white-space: nowrap;
-    padding: 6px 10px;
-    min-width: 130px;
+    font-size: 12px; font-weight: 600; color: var(--mid);
+    background: var(--section-bg); white-space: nowrap;
+    padding: 6px 10px; min-width: 130px;
   }
   table td input[type="text"],
   table td input[type="number"] {
-    width: 100%;
-    border: none;
-    outline: none;
-    font-family: var(--font);
-    font-size: 13px;
-    background: transparent;
-    padding: 4px 2px;
-    color: var(--dark);
+    width: 100%; border: none; outline: none;
+    font-family: var(--font); font-size: 13px;
+    background: transparent; padding: 4px 2px; color: var(--dark);
   }
-  table td input:focus {
-    background: #fff9f9;
-    border-radius: 4px;
-  }
-  .total-row td {
-    background: var(--dark);
-    color: white;
-    font-weight: 700;
-    font-size: 13px;
-    padding: 8px 10px;
-  }
-  .total-row td.total-val {
-    color: #f9c74f;
-  }
+  table td input:focus { background: #fff9f9; border-radius: 4px; }
+  .total-row td { background: var(--dark); color: white; font-weight: 700; font-size: 13px; padding: 8px 10px; }
+  .total-row td.total-val { color: #f9c74f; }
 
   /* ── EXPENSES GRID ── */
-  .expenses-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-    margin-top: 8px;
-  }
-  @media (max-width: 560px) {
-    .expenses-grid { grid-template-columns: 1fr; }
-  }
+  .expenses-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  @media (max-width: 560px) { .expenses-grid { grid-template-columns: 1fr; } }
   .expense-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+    display: flex; align-items: center; gap: 8px;
     background: var(--section-bg);
-    border-radius: 6px;
-    padding: 8px 10px;
-    border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; border: 1px solid var(--border);
   }
-  .expense-item label {
-    flex: 1;
-    font-size: 12px;
-    color: var(--mid);
-    font-weight: 500;
-  }
+  .expense-item label { flex: 1; font-size: 12px; color: var(--mid); font-weight: 500; }
   .expense-item .money-wrap {
-    display: flex;
-    align-items: center;
-    background: white;
-    border: 1.5px solid var(--border);
-    border-radius: 5px;
-    overflow: hidden;
-    width: 100px;
-    flex-shrink: 0;
+    display: flex; align-items: center;
+    background: white; border: 1.5px solid var(--border);
+    border-radius: 5px; overflow: hidden; width: 100px; flex-shrink: 0;
   }
   .expense-item .money-wrap:focus-within { border-color: var(--red); }
   .money-prefix {
-    padding: 5px 6px;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--mid);
-    background: var(--section-bg);
-    border-right: 1px solid var(--border);
+    padding: 5px 6px; font-size: 12px; font-weight: 600; color: var(--mid);
+    background: var(--section-bg); border-right: 1px solid var(--border);
   }
   .expense-item input[type="number"] {
-    border: none;
-    outline: none;
-    font-family: var(--font);
-    font-size: 13px;
-    width: 100%;
-    padding: 5px 6px;
-    background: transparent;
+    border: none; outline: none;
+    font-family: var(--font); font-size: 13px;
+    width: 100%; padding: 5px 6px; background: transparent;
   }
   .expenses-total {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    gap: 12px;
-    margin-top: 12px;
-    padding: 12px 16px;
-    background: var(--dark);
-    border-radius: 8px;
-    color: white;
+    display: flex; justify-content: flex-end; align-items: center; gap: 12px;
+    margin-top: 12px; padding: 12px 16px;
+    background: var(--dark); border-radius: 8px; color: white;
   }
   .expenses-total span { font-size: 13px; font-weight: 600; opacity: 0.8; }
   .expenses-total strong { font-size: 20px; color: #f9c74f; }
 
+  /* ── LICENCE UPLOAD ── */
+  .upload-area {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 32px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    background: var(--section-bg);
+    position: relative;
+  }
+  .upload-area:hover, .upload-area.drag-over {
+    border-color: var(--red);
+    background: #fff5f5;
+  }
+  .upload-area input[type="file"] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .upload-area .upload-icon { font-size: 36px; margin-bottom: 8px; }
+  .upload-area p { font-size: 13px; color: var(--mid); }
+  .upload-area strong { color: var(--red); }
+  #licence-preview {
+    margin-top: 12px;
+    display: none;
+  }
+  #licence-preview img {
+    max-width: 100%; max-height: 260px; border-radius: 8px;
+    border: 2px solid var(--border); display: block; margin: 0 auto;
+  }
+  #licence-preview .preview-name {
+    text-align: center; font-size: 12px; color: var(--mid); margin-top: 6px;
+  }
+  #licence-preview .remove-btn {
+    display: block; margin: 8px auto 0;
+    background: none; border: none; color: var(--red);
+    font-size: 12px; font-weight: 600; cursor: pointer; text-decoration: underline;
+  }
+
+  /* ── CONSENT ── */
+  .consent-box {
+    display: flex; align-items: flex-start; gap: 10px;
+    background: var(--section-bg); border-radius: 8px;
+    padding: 14px 16px; margin-top: 16px;
+    border: 1px solid var(--border);
+  }
+  .consent-box input[type="checkbox"] {
+    margin-top: 2px; width: 16px; height: 16px; flex-shrink: 0; cursor: pointer; accent-color: var(--red);
+  }
+  .consent-box label { font-size: 12px; color: var(--mid); cursor: pointer; }
+
   /* ── ACTION BUTTONS ── */
   .action-bar {
-    display: flex;
-    justify-content: center;
-    gap: 12px;
-    margin-top: 24px;
-    flex-wrap: wrap;
+    display: flex; justify-content: center; gap: 12px;
+    margin-top: 24px; flex-wrap: wrap;
   }
   .btn {
-    padding: 12px 32px;
-    border-radius: 8px;
-    font-family: var(--font);
-    font-size: 14px;
-    font-weight: 700;
-    cursor: pointer;
-    border: 2px solid transparent;
-    transition: all 0.15s;
-    letter-spacing: 0.04em;
+    padding: 12px 32px; border-radius: 8px;
+    font-family: var(--font); font-size: 14px; font-weight: 700;
+    cursor: pointer; border: 2px solid transparent;
+    transition: all 0.15s; letter-spacing: 0.04em;
   }
-  .btn-primary {
-    background: var(--red);
-    color: white;
-    border-color: var(--red);
-  }
+  .btn-primary { background: var(--red); color: white; border-color: var(--red); }
   .btn-primary:hover { background: var(--red-light); border-color: var(--red-light); }
-  .btn-outline {
-    background: transparent;
-    color: var(--mid);
-    border-color: var(--border);
-  }
+  .btn-primary:disabled { background: #ccc; border-color: #ccc; cursor: not-allowed; }
+  .btn-outline { background: transparent; color: var(--mid); border-color: var(--border); }
   .btn-outline:hover { border-color: var(--mid); color: var(--dark); }
 
-  /* ── DIVIDER ── */
-  .divider {
-    height: 1px;
-    background: var(--border);
-    margin: 16px 0;
+  /* ── STATUS MESSAGE ── */
+  #submit-status {
+    margin-top: 20px;
+    border-radius: 10px;
+    padding: 0;
+    overflow: hidden;
+    display: none;
   }
+  #submit-status.success {
+    display: block;
+    background: #d4edda;
+    border: 1.5px solid #28a745;
+    padding: 18px 20px;
+    text-align: center;
+  }
+  #submit-status.error {
+    display: block;
+    background: #f8d7da;
+    border: 1.5px solid #dc3545;
+    padding: 18px 20px;
+    text-align: center;
+  }
+  #submit-status h3 { font-size: 15px; margin-bottom: 4px; }
+  #submit-status p { font-size: 13px; opacity: 0.85; }
 
-  .sub-header {
-    font-size: 12px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
-    color: var(--red);
-    margin: 16px 0 8px;
-  }
+  /* ── MISC ── */
+  .sub-header { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--red); margin: 16px 0 8px; }
 
   /* ── PRINT STYLES ── */
   @media print {
     body { background: white; font-size: 11px; }
     header { background: #1a1a2e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    .action-bar { display: none !important; }
+    #setup-banner, .action-bar, #submit-status, .upload-area input[type="file"] { display: none !important; }
     main { margin: 0; padding: 0 8px 16px; max-width: 100%; }
     .section { page-break-inside: avoid; border: 1px solid #ccc; margin-bottom: 12px; }
-    .applicant-grid { grid-template-columns: 1fr 1fr; }
-    .expenses-grid { grid-template-columns: 1fr 1fr; }
-    .section-header { background: #1a1a2e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    .total-row td { background: #1a1a2e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    .expenses-total { background: #1a1a2e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .applicant-grid, .expenses-grid { grid-template-columns: 1fr 1fr; }
+    .section-header, .total-row td, .expenses-total { background: #1a1a2e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     .pill-group input[type="radio"]:checked + label { background: #c0392b !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    #licence-preview { display: block !important; }
   }
 </style>
 </head>
 <body>
+
+<!-- ══════════════════════════════════════
+     SETUP BANNER (hidden once configured)
+══════════════════════════════════════ -->
+<div id="setup-banner">
+  <div class="setup-icon">⚙️</div>
+  <div>
+    <h3>One-time setup required to enable email submission</h3>
+    <p>This form sends directly to <strong>marcus@alertloans.com.au</strong> via EmailJS (free, no server needed). Complete these steps once:</p>
+    <ol>
+      <li>Sign up free at <a href="https://www.emailjs.com" target="_blank">emailjs.com</a></li>
+      <li>Add an Email Service (Gmail recommended) → copy the <code>Service ID</code></li>
+      <li>Create an Email Template → set <em>To Email</em> to <code>marcus@alertloans.com.au</code>, <em>Subject</em> to <code>{{subject}}</code>, and <em>HTML Content</em> to <code>{{message}}</code> → copy the <code>Template ID</code></li>
+      <li>Go to Account → API Keys → copy your <code>Public Key</code></li>
+      <li>Open this HTML file in a text editor and replace the three placeholders near the top of the &lt;script&gt; block: <code>YOUR_PUBLIC_KEY</code>, <code>YOUR_SERVICE_ID</code>, <code>YOUR_TEMPLATE_ID</code></li>
+    </ol>
+  </div>
+</div>
 
 <header>
   <div class="logo">
@@ -435,7 +384,6 @@
         <!-- APPLICANT 1 -->
         <div class="applicant-col">
           <div class="applicant-label">Applicant 1</div>
-
           <div class="field">
             <label>Role</label>
             <div class="pill-group">
@@ -445,23 +393,19 @@
               <label for="a1_guarantor">Guarantor</label>
             </div>
           </div>
-
           <div class="field-row cols-3">
             <div class="field"><label>Given Name</label><input type="text" id="a1_given" placeholder="Given name"></div>
             <div class="field"><label>Middle Name</label><input type="text" id="a1_middle" placeholder="Middle name"></div>
             <div class="field"><label>Surname</label><input type="text" id="a1_surname" placeholder="Surname"></div>
           </div>
-
           <div class="field-row cols-2">
             <div class="field"><label>Phone (Mobile)</label><input type="tel" id="a1_phone" placeholder="04xx xxx xxx"></div>
             <div class="field"><label>Email</label><input type="email" id="a1_email" placeholder="email@example.com"></div>
           </div>
-
           <div class="field-row cols-2">
             <div class="field"><label>Employer</label><input type="text" id="a1_employer" placeholder="Employer name"></div>
             <div class="field"><label>Length of Employment</label><input type="text" id="a1_emp_length" placeholder="e.g. 3 years 2 months"></div>
           </div>
-
           <div class="field-row cols-2">
             <div class="field"><label>Date of Birth</label><input type="date" id="a1_dob"></div>
             <div class="field">
@@ -469,37 +413,27 @@
               <input type="number" id="a1_years_addr" min="0" max="99" placeholder="Years" oninput="togglePrevAddr('a1', this.value)">
             </div>
           </div>
-
           <div class="field">
             <label>Marital Status</label>
             <div class="pill-group">
-              <input type="radio" name="a1_marital" id="a1_single" value="Single">
-              <label for="a1_single">Single</label>
-              <input type="radio" name="a1_marital" id="a1_married" value="Married">
-              <label for="a1_married">Married</label>
-              <input type="radio" name="a1_marital" id="a1_defacto" value="De Facto">
-              <label for="a1_defacto">De Facto</label>
-              <input type="radio" name="a1_marital" id="a1_divorced" value="Divorced">
-              <label for="a1_divorced">Divorced</label>
-              <input type="radio" name="a1_marital" id="a1_separated" value="Separated">
-              <label for="a1_separated">Separated</label>
-              <input type="radio" name="a1_marital" id="a1_widowed" value="Widowed">
-              <label for="a1_widowed">Widowed</label>
+              <input type="radio" name="a1_marital" id="a1_single" value="Single"><label for="a1_single">Single</label>
+              <input type="radio" name="a1_marital" id="a1_married" value="Married"><label for="a1_married">Married</label>
+              <input type="radio" name="a1_marital" id="a1_defacto" value="De Facto"><label for="a1_defacto">De Facto</label>
+              <input type="radio" name="a1_marital" id="a1_divorced" value="Divorced"><label for="a1_divorced">Divorced</label>
+              <input type="radio" name="a1_marital" id="a1_separated" value="Separated"><label for="a1_separated">Separated</label>
+              <input type="radio" name="a1_marital" id="a1_widowed" value="Widowed"><label for="a1_widowed">Widowed</label>
             </div>
           </div>
-
           <div class="field">
             <label>Current Residential Address <small style="text-transform:none;font-weight:400;">(PO Box not permitted)</small></label>
             <input type="text" id="a1_curr_addr" placeholder="Street address, Suburb, State, Postcode">
           </div>
-
           <div class="prev-address" id="a1_prev_wrap">
             <div class="field">
               <label>Previous Residential Address <small style="text-transform:none;font-weight:400;">(if less than 3 years at current)</small></label>
               <input type="text" id="a1_prev_addr" placeholder="Street address, Suburb, State, Postcode">
             </div>
           </div>
-
           <div class="field">
             <label>Dependants — Ages (children under 18 only)</label>
             <div class="dep-grid">
@@ -514,35 +448,27 @@
         <!-- APPLICANT 2 -->
         <div class="applicant-col">
           <div class="applicant-label">Applicant 2 <span style="font-weight:400;color:#999;">(if applicable)</span></div>
-
           <div class="field">
             <label>Role</label>
             <div class="pill-group">
-              <input type="radio" name="a2_role" id="a2_borrower" value="Borrower">
-              <label for="a2_borrower">Borrower</label>
-              <input type="radio" name="a2_role" id="a2_guarantor" value="Guarantor">
-              <label for="a2_guarantor">Guarantor</label>
-              <input type="radio" name="a2_role" id="a2_none" value="None" checked>
-              <label for="a2_none">Not Applicable</label>
+              <input type="radio" name="a2_role" id="a2_borrower" value="Borrower"><label for="a2_borrower">Borrower</label>
+              <input type="radio" name="a2_role" id="a2_guarantor" value="Guarantor"><label for="a2_guarantor">Guarantor</label>
+              <input type="radio" name="a2_role" id="a2_none" value="None" checked><label for="a2_none">Not Applicable</label>
             </div>
           </div>
-
           <div class="field-row cols-3">
             <div class="field"><label>Given Name</label><input type="text" id="a2_given" placeholder="Given name"></div>
             <div class="field"><label>Middle Name</label><input type="text" id="a2_middle" placeholder="Middle name"></div>
             <div class="field"><label>Surname</label><input type="text" id="a2_surname" placeholder="Surname"></div>
           </div>
-
           <div class="field-row cols-2">
             <div class="field"><label>Phone (Mobile)</label><input type="tel" id="a2_phone" placeholder="04xx xxx xxx"></div>
             <div class="field"><label>Email</label><input type="email" id="a2_email" placeholder="email@example.com"></div>
           </div>
-
           <div class="field-row cols-2">
             <div class="field"><label>Employer</label><input type="text" id="a2_employer" placeholder="Employer name"></div>
             <div class="field"><label>Length of Employment</label><input type="text" id="a2_emp_length" placeholder="e.g. 3 years 2 months"></div>
           </div>
-
           <div class="field-row cols-2">
             <div class="field"><label>Date of Birth</label><input type="date" id="a2_dob"></div>
             <div class="field">
@@ -550,37 +476,27 @@
               <input type="number" id="a2_years_addr" min="0" max="99" placeholder="Years" oninput="togglePrevAddr('a2', this.value)">
             </div>
           </div>
-
           <div class="field">
             <label>Marital Status</label>
             <div class="pill-group">
-              <input type="radio" name="a2_marital" id="a2_single" value="Single">
-              <label for="a2_single">Single</label>
-              <input type="radio" name="a2_marital" id="a2_married" value="Married">
-              <label for="a2_married">Married</label>
-              <input type="radio" name="a2_marital" id="a2_defacto" value="De Facto">
-              <label for="a2_defacto">De Facto</label>
-              <input type="radio" name="a2_marital" id="a2_divorced" value="Divorced">
-              <label for="a2_divorced">Divorced</label>
-              <input type="radio" name="a2_marital" id="a2_separated" value="Separated">
-              <label for="a2_separated">Separated</label>
-              <input type="radio" name="a2_marital" id="a2_widowed" value="Widowed">
-              <label for="a2_widowed">Widowed</label>
+              <input type="radio" name="a2_marital" id="a2_single" value="Single"><label for="a2_single">Single</label>
+              <input type="radio" name="a2_marital" id="a2_married" value="Married"><label for="a2_married">Married</label>
+              <input type="radio" name="a2_marital" id="a2_defacto" value="De Facto"><label for="a2_defacto">De Facto</label>
+              <input type="radio" name="a2_marital" id="a2_divorced" value="Divorced"><label for="a2_divorced">Divorced</label>
+              <input type="radio" name="a2_marital" id="a2_separated" value="Separated"><label for="a2_separated">Separated</label>
+              <input type="radio" name="a2_marital" id="a2_widowed" value="Widowed"><label for="a2_widowed">Widowed</label>
             </div>
           </div>
-
           <div class="field">
             <label>Current Residential Address <small style="text-transform:none;font-weight:400;">(PO Box not permitted)</small></label>
             <input type="text" id="a2_curr_addr" placeholder="Street address, Suburb, State, Postcode">
           </div>
-
           <div class="prev-address" id="a2_prev_wrap">
             <div class="field">
               <label>Previous Residential Address <small style="text-transform:none;font-weight:400;">(if less than 3 years at current)</small></label>
               <input type="text" id="a2_prev_addr" placeholder="Street address, Suburb, State, Postcode">
             </div>
           </div>
-
           <div class="field">
             <label>Dependants — Ages (children under 18 only)</label>
             <div class="dep-grid">
@@ -592,9 +508,9 @@
           </div>
         </div>
 
-      </div><!-- /applicant-grid -->
-    </div><!-- /section-body -->
-  </div><!-- /section -->
+      </div>
+    </div>
+  </div>
 
 
   <!-- ══════════════════════════════════════
@@ -609,15 +525,12 @@
 
       <div class="sub-header">Assets</div>
       <div class="table-wrap">
-        <table id="assets-table">
+        <table>
           <thead>
             <tr>
-              <th>Item</th>
-              <th>Address / Description</th>
-              <th>Value ($)</th>
-              <th>Loan Amount ($)</th>
-              <th>Lender / Institution</th>
-              <th>Monthly Payment ($)</th>
+              <th>Item</th><th>Address / Description</th>
+              <th>Value ($)</th><th>Loan Amount ($)</th>
+              <th>Lender / Institution</th><th>Monthly Payment ($)</th>
             </tr>
           </thead>
           <tbody>
@@ -646,15 +559,9 @@
 
       <div class="sub-header" style="margin-top:24px;">Liabilities</div>
       <div class="table-wrap">
-        <table id="liabilities-table">
+        <table>
           <thead>
-            <tr>
-              <th>Item</th>
-              <th>Lender / Institution</th>
-              <th>Limit ($)</th>
-              <th>Monthly Payment ($)</th>
-              <th>Balance Owing ($)</th>
-            </tr>
+            <tr><th>Item</th><th>Lender / Institution</th><th>Limit ($)</th><th>Monthly Payment ($)</th><th>Balance Owing ($)</th></tr>
           </thead>
           <tbody>
             <tr><td class="row-label">Credit Card 1</td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="liab-limit" min="0" placeholder="0"></td><td><input type="number" class="liab-pmt" min="0" placeholder="0"></td><td><input type="number" class="liab-bal" min="0" placeholder="0"></td></tr>
@@ -677,14 +584,9 @@
 
       <div class="sub-header" style="margin-top:24px;">Other Debts</div>
       <div class="table-wrap">
-        <table id="debts-table">
+        <table>
           <thead>
-            <tr>
-              <th>Item</th>
-              <th>Current Payment ($)</th>
-              <th>Ongoing Payment ($)</th>
-              <th>Balance Owing ($)</th>
-            </tr>
+            <tr><th>Item</th><th>Current Payment ($)</th><th>Ongoing Payment ($)</th><th>Balance Owing ($)</th></tr>
           </thead>
           <tbody>
             <tr><td class="row-label">Child Maintenance</td><td><input type="number" class="debt-curr" min="0" placeholder="0"></td><td><input type="number" class="debt-ongoing" min="0" placeholder="0"></td><td><input type="number" class="debt-bal" min="0" placeholder="0"></td></tr>
@@ -701,9 +603,8 @@
           </tfoot>
         </table>
       </div>
-
-    </div><!-- /section-body -->
-  </div><!-- /section -->
+    </div>
+  </div>
 
 
   <!-- ══════════════════════════════════════
@@ -716,9 +617,7 @@
     </div>
     <div class="section-body">
       <p style="font-size:12px;color:var(--mid);margin-bottom:12px;">Enter monthly amounts for each applicable category.</p>
-      <div class="expenses-grid" id="expenses-grid">
-        <!-- Each row: label + $ input. Generated by JS for maintainability -->
-      </div>
+      <div class="expenses-grid" id="expenses-grid"></div>
       <div class="expenses-total">
         <span>Total Monthly Expenses</span>
         <strong id="expense-total">$0</strong>
@@ -726,46 +625,92 @@
     </div>
   </div>
 
-  <!-- ── ACTION BUTTONS ── -->
-  <div class="action-bar">
-    <button class="btn btn-primary" onclick="window.print()">Print / Save as PDF</button>
-    <button class="btn btn-outline" onclick="resetForm()">Reset All Fields</button>
+
+  <!-- ══════════════════════════════════════
+       DRIVER'S LICENCE UPLOAD
+  ══════════════════════════════════════ -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-num">+</div>
+      <h2>Driver's Licence — Optional</h2>
+    </div>
+    <div class="section-body">
+      <p style="font-size:12px;color:var(--mid);margin-bottom:14px;">Upload a photo or scan of your driver's licence. It will be sent securely alongside your form.</p>
+      <div class="upload-area" id="upload-area">
+        <input type="file" id="licence-file" accept="image/*,application/pdf" onchange="handleLicenceUpload(this)">
+        <div class="upload-icon">📷</div>
+        <p><strong>Tap to upload</strong> or drag and drop here</p>
+        <p style="margin-top:4px;font-size:11px;">JPG, PNG or PDF accepted</p>
+      </div>
+      <div id="licence-preview">
+        <img id="licence-img" src="" alt="Driver's Licence Preview">
+        <p class="preview-name" id="licence-name"></p>
+        <button class="remove-btn" onclick="removeLicence()">Remove</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════
+       SUBMIT
+  ══════════════════════════════════════ -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-num">✓</div>
+      <h2>Submit Your Form</h2>
+    </div>
+    <div class="section-body">
+      <div class="consent-box">
+        <input type="checkbox" id="consent" onchange="document.getElementById('submit-btn').disabled = !this.checked">
+        <label for="consent">
+          I confirm the information provided in this form is true and accurate. I consent to Alert Capital using this information to assess my home loan application and to contact me regarding my enquiry.
+        </label>
+      </div>
+      <div class="action-bar">
+        <button class="btn btn-primary" id="submit-btn" disabled onclick="submitForm()">Submit Form</button>
+        <button class="btn btn-outline" onclick="window.print()">Print / Save as PDF</button>
+        <button class="btn btn-outline" onclick="resetForm()">Reset All Fields</button>
+      </div>
+      <div id="submit-status"></div>
+    </div>
   </div>
 
 </main>
 
 <script>
+  // ─────────────────────────────────────────
+  //  EMAILJS CREDENTIALS
+  //  Replace these three values after setting
+  //  up your free EmailJS account.
+  // ─────────────────────────────────────────
+  const EMAILJS_PUBLIC_KEY  = 'YOUR_PUBLIC_KEY';
+  const EMAILJS_SERVICE_ID  = 'YOUR_SERVICE_ID';
+  const EMAILJS_TEMPLATE_ID = 'YOUR_TEMPLATE_ID';
+
+  const CONFIGURED = !['YOUR_PUBLIC_KEY','YOUR_SERVICE_ID','YOUR_TEMPLATE_ID']
+    .some(p => [EMAILJS_PUBLIC_KEY, EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID].includes(p));
+
+  if (CONFIGURED) {
+    emailjs.init(EMAILJS_PUBLIC_KEY);
+    document.getElementById('setup-banner').style.display = 'none';
+  }
+
   // ── EXPENSE CATEGORIES ──
   const EXPENSE_CATS = [
-    'Primary Residence Running Costs',
-    'General Basic Insurance',
-    'Health Insurance',
-    'Telephone, Internet & Streaming',
-    'Sickness & Life Insurance',
-    'Private School & Tuition',
-    'Public / Government Education',
-    'Higher Education & Vocational',
-    'Groceries',
-    'Transport',
-    'Recreation & Entertainment',
-    'Childcare',
-    'Medical & Health',
-    'Clothing & Personal Care',
-    'Investment Property Running Costs',
-    'Body Corporate / Strata / Land Tax',
-    'Pet Care',
-    'Secondary Residence Running Costs',
-    'Other'
+    'Primary Residence Running Costs','General Basic Insurance','Health Insurance',
+    'Telephone, Internet & Streaming','Sickness & Life Insurance','Private School & Tuition',
+    'Public / Government Education','Higher Education & Vocational','Groceries','Transport',
+    'Recreation & Entertainment','Childcare','Medical & Health','Clothing & Personal Care',
+    'Investment Property Running Costs','Body Corporate / Strata / Land Tax',
+    'Pet Care','Secondary Residence Running Costs','Other'
   ];
 
-  // Build expense items
   const grid = document.getElementById('expenses-grid');
   EXPENSE_CATS.forEach((cat, i) => {
     const id = 'exp_' + i;
     const div = document.createElement('div');
     div.className = 'expense-item';
-    div.innerHTML = `
-      <label for="${id}">${cat}</label>
+    div.innerHTML = `<label for="${id}">${cat}</label>
       <div class="money-wrap">
         <span class="money-prefix">$</span>
         <input type="number" id="${id}" class="exp-input" min="0" placeholder="0">
@@ -774,58 +719,252 @@
   });
 
   // ── TOTALS ──
-  function sumInputs(selector) {
-    return Array.from(document.querySelectorAll(selector))
-      .reduce((s, el) => s + (parseFloat(el.value) || 0), 0);
+  function sumInputs(sel) {
+    return Array.from(document.querySelectorAll(sel)).reduce((s, el) => s + (parseFloat(el.value) || 0), 0);
   }
   function fmt(n) {
     return '$' + n.toLocaleString('en-AU', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
   }
-
   function updateTotals() {
-    // Assets
-    document.getElementById('total-asset-val').textContent  = fmt(sumInputs('.asset-val'));
-    document.getElementById('total-asset-loan').textContent = fmt(sumInputs('.asset-loan'));
-    document.getElementById('total-asset-pmt').textContent  = fmt(sumInputs('.asset-pmt'));
-    // Liabilities
-    document.getElementById('total-liab-limit').textContent = fmt(sumInputs('.liab-limit'));
-    document.getElementById('total-liab-pmt').textContent   = fmt(sumInputs('.liab-pmt'));
-    document.getElementById('total-liab-bal').textContent   = fmt(sumInputs('.liab-bal'));
-    // Other debts
-    document.getElementById('total-debt-curr').textContent    = fmt(sumInputs('.debt-curr'));
-    document.getElementById('total-debt-ongoing').textContent = fmt(sumInputs('.debt-ongoing'));
-    document.getElementById('total-debt-bal').textContent     = fmt(sumInputs('.debt-bal'));
-    // Expenses
-    document.getElementById('expense-total').textContent = fmt(sumInputs('.exp-input'));
+    document.getElementById('total-asset-val').textContent   = fmt(sumInputs('.asset-val'));
+    document.getElementById('total-asset-loan').textContent  = fmt(sumInputs('.asset-loan'));
+    document.getElementById('total-asset-pmt').textContent   = fmt(sumInputs('.asset-pmt'));
+    document.getElementById('total-liab-limit').textContent  = fmt(sumInputs('.liab-limit'));
+    document.getElementById('total-liab-pmt').textContent    = fmt(sumInputs('.liab-pmt'));
+    document.getElementById('total-liab-bal').textContent    = fmt(sumInputs('.liab-bal'));
+    document.getElementById('total-debt-curr').textContent   = fmt(sumInputs('.debt-curr'));
+    document.getElementById('total-debt-ongoing').textContent= fmt(sumInputs('.debt-ongoing'));
+    document.getElementById('total-debt-bal').textContent    = fmt(sumInputs('.debt-bal'));
+    document.getElementById('expense-total').textContent     = fmt(sumInputs('.exp-input'));
   }
-
   document.addEventListener('input', updateTotals);
 
   // ── PREVIOUS ADDRESS TOGGLE ──
   function togglePrevAddr(prefix, years) {
     const wrap = document.getElementById(prefix + '_prev_wrap');
-    if (wrap) {
-      if (years !== '' && parseFloat(years) < 3) {
-        wrap.classList.add('visible');
+    if (!wrap) return;
+    wrap.classList.toggle('visible', years !== '' && parseFloat(years) < 3);
+  }
+
+  // ── DRIVER'S LICENCE ──
+  let licenceBase64 = null;
+  let licenceFileName = '';
+
+  function handleLicenceUpload(input) {
+    const file = input.files[0];
+    if (!file) return;
+    licenceFileName = file.name;
+    const reader = new FileReader();
+    reader.onload = e => {
+      licenceBase64 = e.target.result;
+      const preview = document.getElementById('licence-preview');
+      const img = document.getElementById('licence-img');
+      const name = document.getElementById('licence-name');
+      preview.style.display = 'block';
+      name.textContent = file.name;
+      if (file.type.startsWith('image/')) {
+        img.src = licenceBase64;
+        img.style.display = 'block';
       } else {
-        wrap.classList.remove('visible');
+        img.style.display = 'none';
       }
+      document.getElementById('upload-area').style.display = 'none';
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function removeLicence() {
+    licenceBase64 = null;
+    licenceFileName = '';
+    document.getElementById('licence-file').value = '';
+    document.getElementById('licence-preview').style.display = 'none';
+    document.getElementById('upload-area').style.display = 'block';
+  }
+
+  // ── DRAG-AND-DROP ──
+  const uploadArea = document.getElementById('upload-area');
+  uploadArea.addEventListener('dragover', e => { e.preventDefault(); uploadArea.classList.add('drag-over'); });
+  uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('drag-over'));
+  uploadArea.addEventListener('drop', e => {
+    e.preventDefault();
+    uploadArea.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      document.getElementById('licence-file').files = dt.files;
+      handleLicenceUpload(document.getElementById('licence-file'));
     }
+  });
+
+  // ── HELPERS ──
+  function val(id) { return (document.getElementById(id) || {}).value || ''; }
+  function radio(name) {
+    const el = document.querySelector(`input[name="${name}"]:checked`);
+    return el ? el.value : '—';
+  }
+
+  // ── BUILD EMAIL HTML ──
+  function buildEmailHTML() {
+    const now = new Date().toLocaleString('en-AU', { dateStyle: 'full', timeStyle: 'short' });
+
+    const licenceSection = licenceBase64
+      ? (licenceBase64.startsWith('data:image')
+          ? `<h2 style="color:#c0392b;">Driver's Licence</h2><img src="${licenceBase64}" style="max-width:400px;border-radius:8px;border:1px solid #ddd;" alt="Licence"><br>`
+          : `<h2 style="color:#c0392b;">Driver's Licence</h2><p><em>PDF file attached: ${licenceFileName}</em></p>`)
+      : '<p><em>No driver\'s licence uploaded.</em></p>';
+
+    const expRows = EXPENSE_CATS.map((cat, i) => {
+      const v = val('exp_' + i);
+      return v ? `<tr><td style="padding:4px 8px;border-bottom:1px solid #eee;">${cat}</td><td style="padding:4px 8px;border-bottom:1px solid #eee;">$${parseFloat(v).toLocaleString('en-AU')}</td></tr>` : '';
+    }).join('');
+
+    return `
+<div style="font-family:Arial,sans-serif;max-width:800px;color:#1a1a2e;">
+  <div style="background:#1a1a2e;color:white;padding:20px 24px;border-radius:8px 8px 0 0;">
+    <h1 style="margin:0;font-size:20px;">Alert Capital — Fact Finder Submission</h1>
+    <p style="margin:4px 0 0;opacity:0.7;font-size:13px;">Submitted: ${now}</p>
+  </div>
+
+  <div style="background:#fff;border:1px solid #ddd;padding:24px;border-radius:0 0 8px 8px;">
+
+    <h2 style="color:#c0392b;border-bottom:2px solid #c0392b;padding-bottom:6px;">1. Personal Details</h2>
+
+    <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+      <tr style="background:#f0f2fa;">
+        <th style="padding:8px;text-align:left;font-size:12px;text-transform:uppercase;color:#4a4a6a;" colspan="2">Applicant 1 — ${radio('a1_role')}</th>
+        <th style="padding:8px;text-align:left;font-size:12px;text-transform:uppercase;color:#4a4a6a;" colspan="2">Applicant 2 — ${radio('a2_role')}</th>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px;color:#666;font-size:12px;width:15%;">Name</td>
+        <td style="padding:6px 8px;font-weight:600;">${[val('a1_given'), val('a1_middle'), val('a1_surname')].filter(Boolean).join(' ') || '—'}</td>
+        <td style="padding:6px 8px;color:#666;font-size:12px;width:15%;">Name</td>
+        <td style="padding:6px 8px;font-weight:600;">${[val('a2_given'), val('a2_middle'), val('a2_surname')].filter(Boolean).join(' ') || '—'}</td>
+      </tr>
+      <tr style="background:#fafafa;">
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Mobile</td>
+        <td style="padding:6px 8px;">${val('a1_phone') || '—'}</td>
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Mobile</td>
+        <td style="padding:6px 8px;">${val('a2_phone') || '—'}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Email</td>
+        <td style="padding:6px 8px;">${val('a1_email') || '—'}</td>
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Email</td>
+        <td style="padding:6px 8px;">${val('a2_email') || '—'}</td>
+      </tr>
+      <tr style="background:#fafafa;">
+        <td style="padding:6px 8px;color:#666;font-size:12px;">DOB</td>
+        <td style="padding:6px 8px;">${val('a1_dob') || '—'}</td>
+        <td style="padding:6px 8px;color:#666;font-size:12px;">DOB</td>
+        <td style="padding:6px 8px;">${val('a2_dob') || '—'}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Marital Status</td>
+        <td style="padding:6px 8px;">${radio('a1_marital')}</td>
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Marital Status</td>
+        <td style="padding:6px 8px;">${radio('a2_marital')}</td>
+      </tr>
+      <tr style="background:#fafafa;">
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Employer</td>
+        <td style="padding:6px 8px;">${val('a1_employer') || '—'} (${val('a1_emp_length') || '—'})</td>
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Employer</td>
+        <td style="padding:6px 8px;">${val('a2_employer') || '—'} (${val('a2_emp_length') || '—'})</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Address</td>
+        <td style="padding:6px 8px;">${val('a1_curr_addr') || '—'}</td>
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Address</td>
+        <td style="padding:6px 8px;">${val('a2_curr_addr') || '—'}</td>
+      </tr>
+      <tr style="background:#fafafa;">
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Prev. Address</td>
+        <td style="padding:6px 8px;">${val('a1_prev_addr') || '—'}</td>
+        <td style="padding:6px 8px;color:#666;font-size:12px;">Prev. Address</td>
+        <td style="padding:6px 8px;">${val('a2_prev_addr') || '—'}</td>
+      </tr>
+    </table>
+
+    <h2 style="color:#c0392b;border-bottom:2px solid #c0392b;padding-bottom:6px;margin-top:24px;">2. Assets &amp; Liabilities</h2>
+    <p><strong>Total Asset Value:</strong> ${document.getElementById('total-asset-val').textContent} &nbsp;|&nbsp;
+       <strong>Total Loan Amount:</strong> ${document.getElementById('total-asset-loan').textContent} &nbsp;|&nbsp;
+       <strong>Total Monthly Payments:</strong> ${document.getElementById('total-asset-pmt').textContent}</p>
+    <p style="margin-top:8px;"><strong>Total Liabilities:</strong> ${document.getElementById('total-liab-bal').textContent} &nbsp;|&nbsp;
+       <strong>Total Monthly Liability Payments:</strong> ${document.getElementById('total-liab-pmt').textContent}</p>
+
+    <h2 style="color:#c0392b;border-bottom:2px solid #c0392b;padding-bottom:6px;margin-top:24px;">3. Monthly Expenses</h2>
+    <table style="width:100%;border-collapse:collapse;">
+      <tr style="background:#f0f2fa;">
+        <th style="padding:6px 8px;text-align:left;font-size:12px;text-transform:uppercase;color:#4a4a6a;">Category</th>
+        <th style="padding:6px 8px;text-align:left;font-size:12px;text-transform:uppercase;color:#4a4a6a;">Monthly Amount</th>
+      </tr>
+      ${expRows || '<tr><td colspan="2" style="padding:8px;color:#999;">No expenses entered.</td></tr>'}
+      <tr style="background:#1a1a2e;color:white;">
+        <td style="padding:8px;font-weight:700;">TOTAL</td>
+        <td style="padding:8px;font-weight:700;color:#f9c74f;">${document.getElementById('expense-total').textContent}</td>
+      </tr>
+    </table>
+
+    <h2 style="color:#c0392b;border-bottom:2px solid #c0392b;padding-bottom:6px;margin-top:24px;">Driver's Licence</h2>
+    ${licenceSection}
+
+  </div>
+</div>`;
+  }
+
+  // ── SUBMIT FORM ──
+  async function submitForm() {
+    if (!CONFIGURED) {
+      showStatus('error', 'EmailJS Not Configured', 'Please complete the one-time setup steps shown at the top of this page, then replace the three placeholder values in the HTML file.');
+      return;
+    }
+
+    const name1 = [val('a1_given'), val('a1_surname')].filter(Boolean).join(' ') || 'Unknown Applicant';
+    if (!val('a1_given') && !val('a1_surname')) {
+      showStatus('error', 'Missing Information', 'Please enter at least the applicant\'s name before submitting.');
+      return;
+    }
+
+    const btn = document.getElementById('submit-btn');
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+
+    try {
+      const subject = `Fact Finder Submission — ${name1} — ${new Date().toLocaleDateString('en-AU')}`;
+      const message = buildEmailHTML();
+
+      await emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, { subject, message });
+
+      showStatus('success', 'Form Submitted Successfully!', `Your information has been sent directly to Alert Capital. They will be in touch with you shortly. You can print or save a copy using the button below.`);
+      btn.textContent = 'Submitted ✓';
+    } catch (err) {
+      console.error('EmailJS error:', err);
+      btn.disabled = false;
+      btn.textContent = 'Submit Form';
+      showStatus('error', 'Submission Failed', 'There was a problem sending your form. Please try again or contact Alert Capital directly.');
+    }
+  }
+
+  function showStatus(type, title, message) {
+    const el = document.getElementById('submit-status');
+    el.className = type;
+    el.innerHTML = `<h3>${title}</h3><p>${message}</p>`;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
   // ── RESET ──
   function resetForm() {
     if (!confirm('Clear all fields and start over?')) return;
-    document.querySelectorAll('input:not([type="radio"]), select, textarea').forEach(el => {
-      el.value = '';
-    });
-    // Reset radio buttons to defaults
-    const a1Borrower = document.getElementById('a1_borrower');
-    if (a1Borrower) a1Borrower.checked = true;
-    const a2None = document.getElementById('a2_none');
-    if (a2None) a2None.checked = true;
-    // Hide previous address fields
+    document.querySelectorAll('input:not([type="radio"]):not([type="checkbox"]), select, textarea').forEach(el => el.value = '');
+    document.getElementById('a1_borrower').checked = true;
+    document.getElementById('a2_none').checked = true;
+    document.getElementById('consent').checked = false;
+    document.getElementById('submit-btn').disabled = true;
+    document.getElementById('submit-btn').textContent = 'Submit Form';
     document.querySelectorAll('.prev-address').forEach(el => el.classList.remove('visible'));
+    removeLicence();
+    document.getElementById('submit-status').className = '';
+    document.getElementById('submit-status').innerHTML = '';
     updateTotals();
   }
 </script>
