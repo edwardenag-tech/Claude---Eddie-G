@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alert Capital — Fact Finder</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --red: #c0392b;
+    --red-light: #e74c3c;
+    --dark: #1a1a2e;
+    --mid: #4a4a6a;
+    --border: #d0d0e0;
+    --bg: #f7f8fc;
+    --white: #ffffff;
+    --section-bg: #f0f2fa;
+    --input-bg: #ffffff;
+    --pill-active: var(--red);
+    --pill-active-text: #fff;
+    --pill-inactive: #e8eaf2;
+    --pill-inactive-text: #4a4a6a;
+    --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--dark);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  /* ── HEADER ── */
+  header {
+    background: var(--dark);
+    color: white;
+    padding: 20px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .logo-icon {
+    width: 42px;
+    height: 42px;
+    background: var(--red);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 900;
+    font-size: 20px;
+    color: white;
+    flex-shrink: 0;
+  }
+  .logo-text { line-height: 1.2; }
+  .logo-text strong { font-size: 18px; display: block; }
+  .logo-text span { font-size: 11px; opacity: 0.7; letter-spacing: 0.08em; text-transform: uppercase; }
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    opacity: 0.9;
+    text-align: right;
+  }
+
+  /* ── MAIN LAYOUT ── */
+  main {
+    max-width: 960px;
+    margin: 32px auto;
+    padding: 0 16px 80px;
+  }
+
+  /* ── SECTION ── */
+  .section {
+    background: var(--white);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    margin-bottom: 24px;
+    overflow: hidden;
+  }
+  .section-header {
+    background: var(--dark);
+    color: white;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .section-num {
+    width: 28px;
+    height: 28px;
+    background: var(--red);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+  .section-header h2 { font-size: 14px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+  .section-body { padding: 20px; }
+
+  /* ── APPLICANT COLUMNS ── */
+  .applicant-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 640px) {
+    .applicant-grid { grid-template-columns: 1fr; }
+  }
+  .applicant-col {
+    background: var(--section-bg);
+    border-radius: 8px;
+    padding: 16px;
+    border: 1px solid var(--border);
+  }
+  .applicant-label {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--mid);
+    margin-bottom: 12px;
+  }
+
+  /* ── FORM FIELDS ── */
+  .field { margin-bottom: 12px; }
+  .field label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--mid);
+    margin-bottom: 4px;
+  }
+  .field input[type="text"],
+  .field input[type="email"],
+  .field input[type="tel"],
+  .field input[type="number"],
+  .field input[type="date"],
+  .field select,
+  .field textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1.5px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font);
+    font-size: 13px;
+    background: var(--input-bg);
+    color: var(--dark);
+    transition: border-color 0.15s;
+    outline: none;
+  }
+  .field input:focus,
+  .field select:focus,
+  .field textarea:focus {
+    border-color: var(--red);
+  }
+
+  .field-row {
+    display: grid;
+    gap: 8px;
+  }
+  .field-row.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .field-row.cols-2 { grid-template-columns: 1fr 1fr; }
+
+  /* ── PILL BUTTONS ── */
+  .pill-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .pill-group input[type="radio"] { display: none; }
+  .pill-group label {
+    padding: 6px 14px;
+    border-radius: 20px;
+    background: var(--pill-inactive);
+    color: var(--pill-inactive-text);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1.5px solid transparent;
+    transition: all 0.15s;
+    text-transform: none;
+    letter-spacing: 0;
+    margin-bottom: 0;
+    display: inline-flex;
+    align-items: center;
+  }
+  .pill-group input[type="radio"]:checked + label {
+    background: var(--pill-active);
+    color: var(--pill-active-text);
+    border-color: var(--red);
+  }
+
+  /* ── DEPENDANTS ── */
+  .dep-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  /* ── PREVIOUS ADDRESS TOGGLE ── */
+  .prev-address { display: none; }
+  .prev-address.visible { display: block; }
+
+  /* ── TABLES ── */
+  .table-wrap { overflow-x: auto; margin-top: 8px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  table th {
+    background: var(--section-bg);
+    color: var(--mid);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 8px 10px;
+    text-align: left;
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  table td {
+    border: 1px solid var(--border);
+    padding: 4px 6px;
+    vertical-align: middle;
+  }
+  table td.row-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--mid);
+    background: var(--section-bg);
+    white-space: nowrap;
+    padding: 6px 10px;
+    min-width: 130px;
+  }
+  table td input[type="text"],
+  table td input[type="number"] {
+    width: 100%;
+    border: none;
+    outline: none;
+    font-family: var(--font);
+    font-size: 13px;
+    background: transparent;
+    padding: 4px 2px;
+    color: var(--dark);
+  }
+  table td input:focus {
+    background: #fff9f9;
+    border-radius: 4px;
+  }
+  .total-row td {
+    background: var(--dark);
+    color: white;
+    font-weight: 700;
+    font-size: 13px;
+    padding: 8px 10px;
+  }
+  .total-row td.total-val {
+    color: #f9c74f;
+  }
+
+  /* ── EXPENSES GRID ── */
+  .expenses-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  @media (max-width: 560px) {
+    .expenses-grid { grid-template-columns: 1fr; }
+  }
+  .expense-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--section-bg);
+    border-radius: 6px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+  }
+  .expense-item label {
+    flex: 1;
+    font-size: 12px;
+    color: var(--mid);
+    font-weight: 500;
+  }
+  .expense-item .money-wrap {
+    display: flex;
+    align-items: center;
+    background: white;
+    border: 1.5px solid var(--border);
+    border-radius: 5px;
+    overflow: hidden;
+    width: 100px;
+    flex-shrink: 0;
+  }
+  .expense-item .money-wrap:focus-within { border-color: var(--red); }
+  .money-prefix {
+    padding: 5px 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--mid);
+    background: var(--section-bg);
+    border-right: 1px solid var(--border);
+  }
+  .expense-item input[type="number"] {
+    border: none;
+    outline: none;
+    font-family: var(--font);
+    font-size: 13px;
+    width: 100%;
+    padding: 5px 6px;
+    background: transparent;
+  }
+  .expenses-total {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+    padding: 12px 16px;
+    background: var(--dark);
+    border-radius: 8px;
+    color: white;
+  }
+  .expenses-total span { font-size: 13px; font-weight: 600; opacity: 0.8; }
+  .expenses-total strong { font-size: 20px; color: #f9c74f; }
+
+  /* ── ACTION BUTTONS ── */
+  .action-bar {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 24px;
+    flex-wrap: wrap;
+  }
+  .btn {
+    padding: 12px 32px;
+    border-radius: 8px;
+    font-family: var(--font);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: all 0.15s;
+    letter-spacing: 0.04em;
+  }
+  .btn-primary {
+    background: var(--red);
+    color: white;
+    border-color: var(--red);
+  }
+  .btn-primary:hover { background: var(--red-light); border-color: var(--red-light); }
+  .btn-outline {
+    background: transparent;
+    color: var(--mid);
+    border-color: var(--border);
+  }
+  .btn-outline:hover { border-color: var(--mid); color: var(--dark); }
+
+  /* ── DIVIDER ── */
+  .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 16px 0;
+  }
+
+  .sub-header {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--red);
+    margin: 16px 0 8px;
+  }
+
+  /* ── PRINT STYLES ── */
+  @media print {
+    body { background: white; font-size: 11px; }
+    header { background: #1a1a2e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .action-bar { display: none !important; }
+    main { margin: 0; padding: 0 8px 16px; max-width: 100%; }
+    .section { page-break-inside: avoid; border: 1px solid #ccc; margin-bottom: 12px; }
+    .applicant-grid { grid-template-columns: 1fr 1fr; }
+    .expenses-grid { grid-template-columns: 1fr 1fr; }
+    .section-header { background: #1a1a2e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .total-row td { background: #1a1a2e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .expenses-total { background: #1a1a2e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .pill-group input[type="radio"]:checked + label { background: #c0392b !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">AC</div>
+    <div class="logo-text">
+      <strong>Alert Capital</strong>
+      <span>Home Loan Application</span>
+    </div>
+  </div>
+  <h1>Fact Finder — Individual</h1>
+</header>
+
+<main>
+
+  <!-- ══════════════════════════════════════
+       SECTION 1 — PERSONAL DETAILS
+  ══════════════════════════════════════ -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-num">1</div>
+      <h2>Your Personal Details</h2>
+    </div>
+    <div class="section-body">
+      <div class="applicant-grid">
+
+        <!-- APPLICANT 1 -->
+        <div class="applicant-col">
+          <div class="applicant-label">Applicant 1</div>
+
+          <div class="field">
+            <label>Role</label>
+            <div class="pill-group">
+              <input type="radio" name="a1_role" id="a1_borrower" value="Borrower" checked>
+              <label for="a1_borrower">Borrower</label>
+              <input type="radio" name="a1_role" id="a1_guarantor" value="Guarantor">
+              <label for="a1_guarantor">Guarantor</label>
+            </div>
+          </div>
+
+          <div class="field-row cols-3">
+            <div class="field"><label>Given Name</label><input type="text" id="a1_given" placeholder="Given name"></div>
+            <div class="field"><label>Middle Name</label><input type="text" id="a1_middle" placeholder="Middle name"></div>
+            <div class="field"><label>Surname</label><input type="text" id="a1_surname" placeholder="Surname"></div>
+          </div>
+
+          <div class="field-row cols-2">
+            <div class="field"><label>Phone (Mobile)</label><input type="tel" id="a1_phone" placeholder="04xx xxx xxx"></div>
+            <div class="field"><label>Email</label><input type="email" id="a1_email" placeholder="email@example.com"></div>
+          </div>
+
+          <div class="field-row cols-2">
+            <div class="field"><label>Employer</label><input type="text" id="a1_employer" placeholder="Employer name"></div>
+            <div class="field"><label>Length of Employment</label><input type="text" id="a1_emp_length" placeholder="e.g. 3 years 2 months"></div>
+          </div>
+
+          <div class="field-row cols-2">
+            <div class="field"><label>Date of Birth</label><input type="date" id="a1_dob"></div>
+            <div class="field">
+              <label>Years at Current Address</label>
+              <input type="number" id="a1_years_addr" min="0" max="99" placeholder="Years" oninput="togglePrevAddr('a1', this.value)">
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Marital Status</label>
+            <div class="pill-group">
+              <input type="radio" name="a1_marital" id="a1_single" value="Single">
+              <label for="a1_single">Single</label>
+              <input type="radio" name="a1_marital" id="a1_married" value="Married">
+              <label for="a1_married">Married</label>
+              <input type="radio" name="a1_marital" id="a1_defacto" value="De Facto">
+              <label for="a1_defacto">De Facto</label>
+              <input type="radio" name="a1_marital" id="a1_divorced" value="Divorced">
+              <label for="a1_divorced">Divorced</label>
+              <input type="radio" name="a1_marital" id="a1_separated" value="Separated">
+              <label for="a1_separated">Separated</label>
+              <input type="radio" name="a1_marital" id="a1_widowed" value="Widowed">
+              <label for="a1_widowed">Widowed</label>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Current Residential Address <small style="text-transform:none;font-weight:400;">(PO Box not permitted)</small></label>
+            <input type="text" id="a1_curr_addr" placeholder="Street address, Suburb, State, Postcode">
+          </div>
+
+          <div class="prev-address" id="a1_prev_wrap">
+            <div class="field">
+              <label>Previous Residential Address <small style="text-transform:none;font-weight:400;">(if less than 3 years at current)</small></label>
+              <input type="text" id="a1_prev_addr" placeholder="Street address, Suburb, State, Postcode">
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Dependants — Ages (children under 18 only)</label>
+            <div class="dep-grid">
+              <input type="number" id="a1_dep1" min="0" max="17" placeholder="Age 1">
+              <input type="number" id="a1_dep2" min="0" max="17" placeholder="Age 2">
+              <input type="number" id="a1_dep3" min="0" max="17" placeholder="Age 3">
+              <input type="number" id="a1_dep4" min="0" max="17" placeholder="Age 4">
+            </div>
+          </div>
+        </div>
+
+        <!-- APPLICANT 2 -->
+        <div class="applicant-col">
+          <div class="applicant-label">Applicant 2 <span style="font-weight:400;color:#999;">(if applicable)</span></div>
+
+          <div class="field">
+            <label>Role</label>
+            <div class="pill-group">
+              <input type="radio" name="a2_role" id="a2_borrower" value="Borrower">
+              <label for="a2_borrower">Borrower</label>
+              <input type="radio" name="a2_role" id="a2_guarantor" value="Guarantor">
+              <label for="a2_guarantor">Guarantor</label>
+              <input type="radio" name="a2_role" id="a2_none" value="None" checked>
+              <label for="a2_none">Not Applicable</label>
+            </div>
+          </div>
+
+          <div class="field-row cols-3">
+            <div class="field"><label>Given Name</label><input type="text" id="a2_given" placeholder="Given name"></div>
+            <div class="field"><label>Middle Name</label><input type="text" id="a2_middle" placeholder="Middle name"></div>
+            <div class="field"><label>Surname</label><input type="text" id="a2_surname" placeholder="Surname"></div>
+          </div>
+
+          <div class="field-row cols-2">
+            <div class="field"><label>Phone (Mobile)</label><input type="tel" id="a2_phone" placeholder="04xx xxx xxx"></div>
+            <div class="field"><label>Email</label><input type="email" id="a2_email" placeholder="email@example.com"></div>
+          </div>
+
+          <div class="field-row cols-2">
+            <div class="field"><label>Employer</label><input type="text" id="a2_employer" placeholder="Employer name"></div>
+            <div class="field"><label>Length of Employment</label><input type="text" id="a2_emp_length" placeholder="e.g. 3 years 2 months"></div>
+          </div>
+
+          <div class="field-row cols-2">
+            <div class="field"><label>Date of Birth</label><input type="date" id="a2_dob"></div>
+            <div class="field">
+              <label>Years at Current Address</label>
+              <input type="number" id="a2_years_addr" min="0" max="99" placeholder="Years" oninput="togglePrevAddr('a2', this.value)">
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Marital Status</label>
+            <div class="pill-group">
+              <input type="radio" name="a2_marital" id="a2_single" value="Single">
+              <label for="a2_single">Single</label>
+              <input type="radio" name="a2_marital" id="a2_married" value="Married">
+              <label for="a2_married">Married</label>
+              <input type="radio" name="a2_marital" id="a2_defacto" value="De Facto">
+              <label for="a2_defacto">De Facto</label>
+              <input type="radio" name="a2_marital" id="a2_divorced" value="Divorced">
+              <label for="a2_divorced">Divorced</label>
+              <input type="radio" name="a2_marital" id="a2_separated" value="Separated">
+              <label for="a2_separated">Separated</label>
+              <input type="radio" name="a2_marital" id="a2_widowed" value="Widowed">
+              <label for="a2_widowed">Widowed</label>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Current Residential Address <small style="text-transform:none;font-weight:400;">(PO Box not permitted)</small></label>
+            <input type="text" id="a2_curr_addr" placeholder="Street address, Suburb, State, Postcode">
+          </div>
+
+          <div class="prev-address" id="a2_prev_wrap">
+            <div class="field">
+              <label>Previous Residential Address <small style="text-transform:none;font-weight:400;">(if less than 3 years at current)</small></label>
+              <input type="text" id="a2_prev_addr" placeholder="Street address, Suburb, State, Postcode">
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Dependants — Ages (children under 18 only)</label>
+            <div class="dep-grid">
+              <input type="number" id="a2_dep1" min="0" max="17" placeholder="Age 1">
+              <input type="number" id="a2_dep2" min="0" max="17" placeholder="Age 2">
+              <input type="number" id="a2_dep3" min="0" max="17" placeholder="Age 3">
+              <input type="number" id="a2_dep4" min="0" max="17" placeholder="Age 4">
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /applicant-grid -->
+    </div><!-- /section-body -->
+  </div><!-- /section -->
+
+
+  <!-- ══════════════════════════════════════
+       SECTION 2 — ASSETS & LIABILITIES
+  ══════════════════════════════════════ -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-num">2</div>
+      <h2>Your Assets &amp; Liabilities</h2>
+    </div>
+    <div class="section-body">
+
+      <div class="sub-header">Assets</div>
+      <div class="table-wrap">
+        <table id="assets-table">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th>Address / Description</th>
+              <th>Value ($)</th>
+              <th>Loan Amount ($)</th>
+              <th>Lender / Institution</th>
+              <th>Monthly Payment ($)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td class="row-label">Property 1</td><td><input type="text" placeholder="Address"></td><td><input type="number" class="asset-val" min="0" placeholder="0"></td><td><input type="number" class="asset-loan" min="0" placeholder="0"></td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="asset-pmt" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Property 2</td><td><input type="text" placeholder="Address"></td><td><input type="number" class="asset-val" min="0" placeholder="0"></td><td><input type="number" class="asset-loan" min="0" placeholder="0"></td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="asset-pmt" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Savings</td><td><input type="text" placeholder="Bank / Account"></td><td><input type="number" class="asset-val" min="0" placeholder="0"></td><td><input type="number" class="asset-loan" min="0" placeholder="0"></td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="asset-pmt" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Deposit Paid</td><td><input type="text" placeholder="Description"></td><td><input type="number" class="asset-val" min="0" placeholder="0"></td><td><input type="number" class="asset-loan" min="0" placeholder="0"></td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="asset-pmt" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Motor Vehicle 1</td><td><input type="text" placeholder="Make / Model / Year"></td><td><input type="number" class="asset-val" min="0" placeholder="0"></td><td><input type="number" class="asset-loan" min="0" placeholder="0"></td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="asset-pmt" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Motor Vehicle 2</td><td><input type="text" placeholder="Make / Model / Year"></td><td><input type="number" class="asset-val" min="0" placeholder="0"></td><td><input type="number" class="asset-loan" min="0" placeholder="0"></td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="asset-pmt" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Home Contents</td><td><input type="text" placeholder="Description"></td><td><input type="number" class="asset-val" min="0" placeholder="0"></td><td><input type="number" class="asset-loan" min="0" placeholder="0"></td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="asset-pmt" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Superannuation</td><td><input type="text" placeholder="Fund name"></td><td><input type="number" class="asset-val" min="0" placeholder="0"></td><td><input type="number" class="asset-loan" min="0" placeholder="0"></td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="asset-pmt" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Shares / Investments</td><td><input type="text" placeholder="Description"></td><td><input type="number" class="asset-val" min="0" placeholder="0"></td><td><input type="number" class="asset-loan" min="0" placeholder="0"></td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="asset-pmt" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Other (boats, etc.)</td><td><input type="text" placeholder="Description"></td><td><input type="number" class="asset-val" min="0" placeholder="0"></td><td><input type="number" class="asset-loan" min="0" placeholder="0"></td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="asset-pmt" min="0" placeholder="0"></td></tr>
+          </tbody>
+          <tfoot>
+            <tr class="total-row">
+              <td colspan="2">TOTAL</td>
+              <td class="total-val" id="total-asset-val">$0</td>
+              <td class="total-val" id="total-asset-loan">$0</td>
+              <td></td>
+              <td class="total-val" id="total-asset-pmt">$0</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <div class="sub-header" style="margin-top:24px;">Liabilities</div>
+      <div class="table-wrap">
+        <table id="liabilities-table">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th>Lender / Institution</th>
+              <th>Limit ($)</th>
+              <th>Monthly Payment ($)</th>
+              <th>Balance Owing ($)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td class="row-label">Credit Card 1</td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="liab-limit" min="0" placeholder="0"></td><td><input type="number" class="liab-pmt" min="0" placeholder="0"></td><td><input type="number" class="liab-bal" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Credit Card 2</td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="liab-limit" min="0" placeholder="0"></td><td><input type="number" class="liab-pmt" min="0" placeholder="0"></td><td><input type="number" class="liab-bal" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Store Card</td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="liab-limit" min="0" placeholder="0"></td><td><input type="number" class="liab-pmt" min="0" placeholder="0"></td><td><input type="number" class="liab-bal" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Personal Loan</td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="liab-limit" min="0" placeholder="0"></td><td><input type="number" class="liab-pmt" min="0" placeholder="0"></td><td><input type="number" class="liab-bal" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Other Loans</td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="liab-limit" min="0" placeholder="0"></td><td><input type="number" class="liab-pmt" min="0" placeholder="0"></td><td><input type="number" class="liab-bal" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Lease (e.g. vehicle)</td><td><input type="text" placeholder="Lender"></td><td><input type="number" class="liab-limit" min="0" placeholder="0"></td><td><input type="number" class="liab-pmt" min="0" placeholder="0"></td><td><input type="number" class="liab-bal" min="0" placeholder="0"></td></tr>
+          </tbody>
+          <tfoot>
+            <tr class="total-row">
+              <td colspan="2">TOTAL</td>
+              <td class="total-val" id="total-liab-limit">$0</td>
+              <td class="total-val" id="total-liab-pmt">$0</td>
+              <td class="total-val" id="total-liab-bal">$0</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <div class="sub-header" style="margin-top:24px;">Other Debts</div>
+      <div class="table-wrap">
+        <table id="debts-table">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th>Current Payment ($)</th>
+              <th>Ongoing Payment ($)</th>
+              <th>Balance Owing ($)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td class="row-label">Child Maintenance</td><td><input type="number" class="debt-curr" min="0" placeholder="0"></td><td><input type="number" class="debt-ongoing" min="0" placeholder="0"></td><td><input type="number" class="debt-bal" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Tax Debt / HECS / HELP</td><td><input type="number" class="debt-curr" min="0" placeholder="0"></td><td><input type="number" class="debt-ongoing" min="0" placeholder="0"></td><td><input type="number" class="debt-bal" min="0" placeholder="0"></td></tr>
+            <tr><td class="row-label">Rent</td><td><input type="number" class="debt-curr" min="0" placeholder="0"></td><td><input type="number" class="debt-ongoing" min="0" placeholder="0"></td><td><input type="number" class="debt-bal" min="0" placeholder="0"></td></tr>
+          </tbody>
+          <tfoot>
+            <tr class="total-row">
+              <td>TOTAL</td>
+              <td class="total-val" id="total-debt-curr">$0</td>
+              <td class="total-val" id="total-debt-ongoing">$0</td>
+              <td class="total-val" id="total-debt-bal">$0</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+    </div><!-- /section-body -->
+  </div><!-- /section -->
+
+
+  <!-- ══════════════════════════════════════
+       SECTION 3 — EXPENSES
+  ══════════════════════════════════════ -->
+  <div class="section">
+    <div class="section-header">
+      <div class="section-num">3</div>
+      <h2>Your Monthly Expenses</h2>
+    </div>
+    <div class="section-body">
+      <p style="font-size:12px;color:var(--mid);margin-bottom:12px;">Enter monthly amounts for each applicable category.</p>
+      <div class="expenses-grid" id="expenses-grid">
+        <!-- Each row: label + $ input. Generated by JS for maintainability -->
+      </div>
+      <div class="expenses-total">
+        <span>Total Monthly Expenses</span>
+        <strong id="expense-total">$0</strong>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── ACTION BUTTONS ── -->
+  <div class="action-bar">
+    <button class="btn btn-primary" onclick="window.print()">Print / Save as PDF</button>
+    <button class="btn btn-outline" onclick="resetForm()">Reset All Fields</button>
+  </div>
+
+</main>
+
+<script>
+  // ── EXPENSE CATEGORIES ──
+  const EXPENSE_CATS = [
+    'Primary Residence Running Costs',
+    'General Basic Insurance',
+    'Health Insurance',
+    'Telephone, Internet & Streaming',
+    'Sickness & Life Insurance',
+    'Private School & Tuition',
+    'Public / Government Education',
+    'Higher Education & Vocational',
+    'Groceries',
+    'Transport',
+    'Recreation & Entertainment',
+    'Childcare',
+    'Medical & Health',
+    'Clothing & Personal Care',
+    'Investment Property Running Costs',
+    'Body Corporate / Strata / Land Tax',
+    'Pet Care',
+    'Secondary Residence Running Costs',
+    'Other'
+  ];
+
+  // Build expense items
+  const grid = document.getElementById('expenses-grid');
+  EXPENSE_CATS.forEach((cat, i) => {
+    const id = 'exp_' + i;
+    const div = document.createElement('div');
+    div.className = 'expense-item';
+    div.innerHTML = `
+      <label for="${id}">${cat}</label>
+      <div class="money-wrap">
+        <span class="money-prefix">$</span>
+        <input type="number" id="${id}" class="exp-input" min="0" placeholder="0">
+      </div>`;
+    grid.appendChild(div);
+  });
+
+  // ── TOTALS ──
+  function sumInputs(selector) {
+    return Array.from(document.querySelectorAll(selector))
+      .reduce((s, el) => s + (parseFloat(el.value) || 0), 0);
+  }
+  function fmt(n) {
+    return '$' + n.toLocaleString('en-AU', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  }
+
+  function updateTotals() {
+    // Assets
+    document.getElementById('total-asset-val').textContent  = fmt(sumInputs('.asset-val'));
+    document.getElementById('total-asset-loan').textContent = fmt(sumInputs('.asset-loan'));
+    document.getElementById('total-asset-pmt').textContent  = fmt(sumInputs('.asset-pmt'));
+    // Liabilities
+    document.getElementById('total-liab-limit').textContent = fmt(sumInputs('.liab-limit'));
+    document.getElementById('total-liab-pmt').textContent   = fmt(sumInputs('.liab-pmt'));
+    document.getElementById('total-liab-bal').textContent   = fmt(sumInputs('.liab-bal'));
+    // Other debts
+    document.getElementById('total-debt-curr').textContent    = fmt(sumInputs('.debt-curr'));
+    document.getElementById('total-debt-ongoing').textContent = fmt(sumInputs('.debt-ongoing'));
+    document.getElementById('total-debt-bal').textContent     = fmt(sumInputs('.debt-bal'));
+    // Expenses
+    document.getElementById('expense-total').textContent = fmt(sumInputs('.exp-input'));
+  }
+
+  document.addEventListener('input', updateTotals);
+
+  // ── PREVIOUS ADDRESS TOGGLE ──
+  function togglePrevAddr(prefix, years) {
+    const wrap = document.getElementById(prefix + '_prev_wrap');
+    if (wrap) {
+      if (years !== '' && parseFloat(years) < 3) {
+        wrap.classList.add('visible');
+      } else {
+        wrap.classList.remove('visible');
+      }
+    }
+  }
+
+  // ── RESET ──
+  function resetForm() {
+    if (!confirm('Clear all fields and start over?')) return;
+    document.querySelectorAll('input:not([type="radio"]), select, textarea').forEach(el => {
+      el.value = '';
+    });
+    // Reset radio buttons to defaults
+    const a1Borrower = document.getElementById('a1_borrower');
+    if (a1Borrower) a1Borrower.checked = true;
+    const a2None = document.getElementById('a2_none');
+    if (a2None) a2None.checked = true;
+    // Hide previous address fields
+    document.querySelectorAll('.prev-address').forEach(el => el.classList.remove('visible'));
+    updateTotals();
+  }
+</script>
+</body>
+</html>
