@@ -1013,17 +1013,57 @@
   function buildEmailText(name1) {
     const now = new Date().toLocaleString('en-AU', { dateStyle: 'full', timeStyle: 'short' });
     const a2name = [val('a2_given'), val('a2_surname')].filter(Boolean).join(' ');
-    return `A new Fact Finder has been submitted.\n\nApplicant 1: ${name1}\n${a2name ? `Applicant 2: ${a2name}\n` : ''}Submitted: ${now}\nDriver's licence: ${licenceBase64 ? 'Attached' : 'Not provided'}\n\nPlease find the completed Fact Finder PDF attached to this email.`;
-  }
+    const a2given = val('a2_given'), a2sur = val('a2_surname');
+    const hasA2 = (a2given || a2sur) && radio('a2_role') !== 'None';
 
-  // ── BASE64 → BLOB HELPER ──
-  function dataURLtoBlob(dataURL) {
-    const [header, data] = dataURL.split(',');
-    const mime = header.match(/:(.*?);/)[1];
-    const bytes = atob(data);
-    const arr = new Uint8Array(bytes.length);
-    for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-    return new Blob([arr], { type: mime });
+    const lines = [
+      `NEW FACT FINDER SUBMISSION`,
+      `Submitted: ${now}`,
+      ``,
+      `─── APPLICANT 1 ───`,
+      `Name:           ${name1}`,
+      `Role:           ${radio('a1_role')}`,
+      `Date of Birth:  ${val('a1_dob') || '—'}`,
+      `Phone:          ${val('a1_phone') || '—'}`,
+      `Email:          ${val('a1_email') || '—'}`,
+      `Employer:       ${val('a1_employer') || '—'}`,
+      `Employment:     ${val('a1_emp_length') || '—'}`,
+      `Marital Status: ${radio('a1_marital')}`,
+      `Address:        ${val('a1_curr_addr') || '—'}`,
+    ];
+
+    if (val('a1_prev_addr')) lines.push(`Prev Address:   ${val('a1_prev_addr')}`);
+
+    const a1deps = [val('a1_dep1'),val('a1_dep2'),val('a1_dep3'),val('a1_dep4')].filter(Boolean);
+    if (a1deps.length) lines.push(`Dependant Ages: ${a1deps.join(', ')}`);
+
+    if (hasA2) {
+      lines.push(``, `─── APPLICANT 2 ───`);
+      lines.push(`Name:           ${[a2given, val('a2_middle'), a2sur].filter(Boolean).join(' ') || '—'}`);
+      lines.push(`Role:           ${radio('a2_role')}`);
+      lines.push(`Date of Birth:  ${val('a2_dob') || '—'}`);
+      lines.push(`Phone:          ${val('a2_phone') || '—'}`);
+      lines.push(`Email:          ${val('a2_email') || '—'}`);
+      lines.push(`Employer:       ${val('a2_employer') || '—'}`);
+      lines.push(`Employment:     ${val('a2_emp_length') || '—'}`);
+      lines.push(`Marital Status: ${radio('a2_marital')}`);
+      lines.push(`Address:        ${val('a2_curr_addr') || '—'}`);
+      if (val('a2_prev_addr')) lines.push(`Prev Address:   ${val('a2_prev_addr')}`);
+      const a2deps = [val('a2_dep1'),val('a2_dep2'),val('a2_dep3'),val('a2_dep4')].filter(Boolean);
+      if (a2deps.length) lines.push(`Dependant Ages: ${a2deps.join(', ')}`);
+    }
+
+    lines.push(``, `─── FINANCIALS ───`);
+    lines.push(`Total Assets:          ${document.getElementById('total-asset-val').textContent}`);
+    lines.push(`Total Loan Amounts:    ${document.getElementById('total-asset-loan').textContent}`);
+    lines.push(`Total Liabilities:     ${document.getElementById('total-liab-bal').textContent}`);
+    lines.push(`Total Monthly Expenses:${document.getElementById('expense-total').textContent}`);
+
+    lines.push(``, `─── OTHER ───`);
+    lines.push(`Driver's Licence Uploaded: ${licenceBase64 ? 'Yes' : 'No'}`);
+    lines.push(``, `The applicant has also downloaded a full PDF copy of this form to their device.`);
+
+    return lines.join('\n');
   }
 
   // ── SUBMIT FORM ──
@@ -1046,7 +1086,7 @@
     const dateStr = new Date().toLocaleDateString('en-AU').replace(/\//g, '-');
 
     try {
-      const pdfBlob = generatePDF(name1, dateStr);
+      generatePDF(name1, dateStr);
 
       btn.textContent = 'Sending…';
 
@@ -1055,19 +1095,12 @@
       formData.append('subject', `Fact Finder — ${name1} — ${dateStr}`);
       formData.append('from_name', name1);
       formData.append('message', buildEmailText(name1));
-      formData.append('attachment[]', pdfBlob, `FactFinder-${name1.replace(/[^a-z0-9]/gi,'-')}-${dateStr}.pdf`);
-
-      if (licenceBase64 && licenceBase64.startsWith('data:image')) {
-        const licBlob = dataURLtoBlob(licenceBase64);
-        const ext = licenceFileName.split('.').pop() || 'jpg';
-        formData.append('attachment[]', licBlob, `DriversLicence-${name1.replace(/[^a-z0-9]/gi,'-')}.${ext}`);
-      }
 
       const res = await fetch('https://api.web3forms.com/submit', { method: 'POST', body: formData });
       const json = await res.json();
 
       if (json.success) {
-        showStatus('success', 'Form Submitted Successfully!', 'Your completed Fact Finder has been sent as a PDF to Alert Capital. A copy has also been downloaded to your device. Alert Capital will be in touch with you shortly.');
+        showStatus('success', 'Form Submitted Successfully!', 'Alert Capital has been notified by email. Your completed Fact Finder PDF has also been downloaded to your device — please keep it for your records. Alert Capital will be in touch shortly.');
         btn.textContent = 'Submitted ✓';
       } else {
         throw new Error(json.message || 'Submission failed');
