@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Alert Capital — Fact Finder</title>
-<!-- EmailJS: sends the form directly to marcus@alertloans.com.au -->
-<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
-<!-- html2pdf: generates a PDF in the browser -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<!-- jsPDF: generates a clean PDF in the browser -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<!-- jsPDF-AutoTable: professional table layouts in the PDF -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -346,13 +346,10 @@
   <div class="setup-icon">⚙️</div>
   <div>
     <h3>One-time setup required to enable email submission</h3>
-    <p>This form sends directly to <strong>marcus@alertloans.com.au</strong> via EmailJS (free, no server needed). Complete these steps once:</p>
+    <p>This form emails a clean PDF directly to <strong>marcus@alertloans.com.au</strong> via Web3Forms (free, no server needed). Two steps:</p>
     <ol>
-      <li>Sign up free at <a href="https://www.emailjs.com" target="_blank">emailjs.com</a></li>
-      <li>Add an Email Service (Gmail recommended) → copy the <code>Service ID</code></li>
-      <li>Create an Email Template → set <em>To Email</em> to <code>marcus@alertloans.com.au</code>, <em>Subject</em> to <code>{{subject}}</code>, and <em>HTML Content</em> to <code>{{message}}</code> → copy the <code>Template ID</code></li>
-      <li>Go to Account → API Keys → copy your <code>Public Key</code></li>
-      <li>Open this HTML file in a text editor and replace the three placeholders near the top of the &lt;script&gt; block: <code>YOUR_PUBLIC_KEY</code>, <code>YOUR_SERVICE_ID</code>, <code>YOUR_TEMPLATE_ID</code></li>
+      <li>Go to <a href="https://web3forms.com" target="_blank">web3forms.com</a> → enter <code>marcus@alertloans.com.au</code> → click <strong>Get Access Key</strong></li>
+      <li>Check the inbox for an email from Web3Forms → copy the access key → open this HTML file in a text editor → replace <code>YOUR_ACCESS_KEY</code> near the top of the &lt;script&gt; block with that key → save and push to GitHub</li>
     </ol>
   </div>
 </div>
@@ -679,21 +676,13 @@
 
 <script>
   // ─────────────────────────────────────────
-  //  EMAILJS CREDENTIALS
-  //  Replace these three values after setting
-  //  up your free EmailJS account.
+  //  WEB3FORMS ACCESS KEY
+  //  Replace with the key from web3forms.com
   // ─────────────────────────────────────────
-  const EMAILJS_PUBLIC_KEY  = 'lzgkjUxBMc8z47SWj';
-  const EMAILJS_SERVICE_ID  = 'service_xycsw7l';
-  const EMAILJS_TEMPLATE_ID = 'template_a7sjn4g';
+  const WEB3FORMS_KEY = 'YOUR_ACCESS_KEY';
 
-  const CONFIGURED = !['YOUR_PUBLIC_KEY','YOUR_SERVICE_ID','YOUR_TEMPLATE_ID']
-    .some(p => [EMAILJS_PUBLIC_KEY, EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID].includes(p));
-
-  if (CONFIGURED) {
-    emailjs.init(EMAILJS_PUBLIC_KEY);
-    document.getElementById('setup-banner').style.display = 'none';
-  }
+  const CONFIGURED = WEB3FORMS_KEY !== 'YOUR_ACCESS_KEY';
+  if (CONFIGURED) document.getElementById('setup-banner').style.display = 'none';
 
   // ── EXPENSE CATEGORIES ──
   const EXPENSE_CATS = [
@@ -804,118 +793,243 @@
     return el ? el.value : '—';
   }
 
-  // ── BUILD EMAIL HTML ──
-  function buildEmailHTML() {
-    const now = new Date().toLocaleString('en-AU', { dateStyle: 'full', timeStyle: 'short' });
+  // ── GENERATE CLEAN PDF ──
+  function generatePDF(name1, dateStr) {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const W = 210, margin = 14, blue = [0, 119, 181], darkBlue = [0, 68, 113], grey = [94, 110, 130];
 
-    const licenceSection = licenceBase64
-      ? (licenceBase64.startsWith('data:image')
-          ? `<h2 style="color:#0077B5;">Driver's Licence</h2><img src="${licenceBase64}" style="max-width:400px;border-radius:8px;border:1px solid #ddd;" alt="Licence"><br>`
-          : `<h2 style="color:#0077B5;">Driver's Licence</h2><p><em>PDF file attached: ${licenceFileName}</em></p>`)
-      : '<p><em>No driver\'s licence uploaded.</em></p>';
+    // ── Header ──
+    doc.setFillColor(...darkBlue);
+    doc.rect(0, 0, W, 28, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(18); doc.setFont('helvetica', 'bold');
+    doc.text('ALERT CAPITAL', margin, 12);
+    doc.setFontSize(10); doc.setFont('helvetica', 'normal');
+    doc.text('FACT FINDER — HOME LOAN APPLICATION', margin, 19);
+    doc.setFontSize(9);
+    doc.text(`Submitted: ${new Date().toLocaleString('en-AU', { dateStyle: 'long', timeStyle: 'short' })}`, W - margin, 19, { align: 'right' });
 
-    const expRows = EXPENSE_CATS.map((cat, i) => {
+    // ── Section heading helper ──
+    let y = 36;
+    function sectionHead(label) {
+      doc.setFillColor(...blue);
+      doc.rect(margin, y, W - margin * 2, 7, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(9); doc.setFont('helvetica', 'bold');
+      doc.text(label, margin + 3, y + 5);
+      doc.setTextColor(0, 0, 0);
+      y += 9;
+    }
+
+    // ── Page 1: Personal Details ──
+    sectionHead('1.  PERSONAL DETAILS');
+
+    const a1Name = [val('a1_given'), val('a1_middle'), val('a1_surname')].filter(Boolean).join(' ') || '—';
+    const a2Name = [val('a2_given'), val('a2_middle'), val('a2_surname')].filter(Boolean).join(' ') || '—';
+    const a2role = radio('a2_role');
+    const hasA2 = a2role !== 'None' && a2Name !== '—';
+
+    const fields = [
+      ['Role',               radio('a1_role'),         hasA2 ? radio('a2_role') : '—'],
+      ['Full Name',          a1Name,                   hasA2 ? a2Name : '—'],
+      ['Date of Birth',      val('a1_dob') || '—',     hasA2 ? (val('a2_dob') || '—') : '—'],
+      ['Mobile',             val('a1_phone') || '—',   hasA2 ? (val('a2_phone') || '—') : '—'],
+      ['Email',              val('a1_email') || '—',   hasA2 ? (val('a2_email') || '—') : '—'],
+      ['Employer',           val('a1_employer') || '—',hasA2 ? (val('a2_employer') || '—') : '—'],
+      ['Length of Employment', val('a1_emp_length') || '—', hasA2 ? (val('a2_emp_length') || '—') : '—'],
+      ['Marital Status',     radio('a1_marital'),       hasA2 ? radio('a2_marital') : '—'],
+      ['Current Address',    val('a1_curr_addr') || '—', hasA2 ? (val('a2_curr_addr') || '—') : '—'],
+      ['Previous Address',   val('a1_prev_addr') || '—', hasA2 ? (val('a2_prev_addr') || '—') : '—'],
+      ['Dependant Ages',
+        [val('a1_dep1'),val('a1_dep2'),val('a1_dep3'),val('a1_dep4')].filter(Boolean).join(', ') || '—',
+        hasA2 ? ([val('a2_dep1'),val('a2_dep2'),val('a2_dep3'),val('a2_dep4')].filter(Boolean).join(', ') || '—') : '—'
+      ],
+    ];
+
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin, right: margin },
+      head: [['', 'Applicant 1', 'Applicant 2']],
+      body: fields,
+      styles: { fontSize: 8, cellPadding: 2.5 },
+      headStyles: { fillColor: [238, 243, 248], textColor: [...grey], fontStyle: 'bold', fontSize: 8 },
+      columnStyles: { 0: { fontStyle: 'bold', cellWidth: 40, fillColor: [248, 250, 252] }, 1: { cellWidth: 73 }, 2: { cellWidth: 73 } },
+      alternateRowStyles: { fillColor: [255, 255, 255] },
+    });
+    y = doc.lastAutoTable.finalY + 6;
+
+    // ── Page 2: Assets & Liabilities ──
+    doc.addPage();
+    y = 36;
+    doc.setFillColor(...darkBlue);
+    doc.rect(0, 0, W, 28, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(18); doc.setFont('helvetica', 'bold');
+    doc.text('ALERT CAPITAL', margin, 12);
+    doc.setFontSize(10); doc.setFont('helvetica', 'normal');
+    doc.text('FACT FINDER — HOME LOAN APPLICATION', margin, 19);
+    doc.setTextColor(0,0,0);
+
+    sectionHead('2.  ASSETS & LIABILITIES — Assets');
+
+    const assetRows = [
+      'Property 1','Property 2','Savings','Deposit Paid',
+      'Motor Vehicle 1','Motor Vehicle 2','Home Contents',
+      'Superannuation','Shares / Investments','Other'
+    ].map((item, i) => {
+      const inputs = document.querySelectorAll('.asset-val, .asset-loan, .asset-pmt');
+      const descInputs = document.querySelectorAll('table#assets-table td:nth-child(2) input');
+      const lenderInputs = document.querySelectorAll('table#assets-table td:nth-child(5) input');
+      // Pull values from each row of the assets table
+      const rows = document.querySelectorAll('#assets-table tbody tr');
+      const row = rows[i];
+      if (!row) return null;
+      const cells = row.querySelectorAll('input');
+      const desc  = cells[0]?.value || '—';
+      const vVal  = cells[1]?.value ? `$${parseFloat(cells[1].value).toLocaleString('en-AU')}` : '—';
+      const loan  = cells[2]?.value ? `$${parseFloat(cells[2].value).toLocaleString('en-AU')}` : '—';
+      const lend  = cells[3]?.value || '—';
+      const pmt   = cells[4]?.value ? `$${parseFloat(cells[4].value).toLocaleString('en-AU')}/mo` : '—';
+      return [item, desc, vVal, loan, lend, pmt];
+    }).filter(Boolean);
+
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin, right: margin },
+      head: [['Item','Description / Address','Value','Loan Amount','Lender','Monthly Pmt']],
+      body: assetRows,
+      foot: [['TOTAL','', document.getElementById('total-asset-val').textContent, document.getElementById('total-asset-loan').textContent, '', document.getElementById('total-asset-pmt').textContent]],
+      styles: { fontSize: 7.5, cellPadding: 2 },
+      headStyles: { fillColor: [238,243,248], textColor: [...grey], fontStyle:'bold', fontSize:7.5 },
+      footStyles: { fillColor: [...darkBlue], textColor:[255,255,255], fontStyle:'bold' },
+      columnStyles: { 0: { cellWidth: 28, fontStyle:'bold', fillColor:[248,250,252] }, 1: { cellWidth: 50 } },
+    });
+    y = doc.lastAutoTable.finalY + 6;
+
+    sectionHead('2.  ASSETS & LIABILITIES — Liabilities');
+    const liabRows = ['Credit Card 1','Credit Card 2','Store Card','Personal Loan','Other Loans','Lease'].map((item, i) => {
+      const rows = document.querySelectorAll('#liabilities-table tbody tr');
+      const row = rows[i]; if (!row) return null;
+      const cells = row.querySelectorAll('input');
+      return [item, cells[0]?.value||'—',
+        cells[1]?.value ? `$${parseFloat(cells[1].value).toLocaleString('en-AU')}` : '—',
+        cells[2]?.value ? `$${parseFloat(cells[2].value).toLocaleString('en-AU')}/mo` : '—',
+        cells[3]?.value ? `$${parseFloat(cells[3].value).toLocaleString('en-AU')}` : '—'
+      ];
+    }).filter(Boolean);
+
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin, right: margin },
+      head: [['Item','Lender','Limit','Monthly Pmt','Balance Owing']],
+      body: liabRows,
+      foot: [['TOTAL','', document.getElementById('total-liab-limit').textContent, document.getElementById('total-liab-pmt').textContent, document.getElementById('total-liab-bal').textContent]],
+      styles: { fontSize: 7.5, cellPadding: 2 },
+      headStyles: { fillColor:[238,243,248], textColor:[...grey], fontStyle:'bold', fontSize:7.5 },
+      footStyles: { fillColor:[...darkBlue], textColor:[255,255,255], fontStyle:'bold' },
+      columnStyles: { 0: { cellWidth: 35, fontStyle:'bold', fillColor:[248,250,252] } },
+    });
+    y = doc.lastAutoTable.finalY + 6;
+
+    sectionHead('2.  ASSETS & LIABILITIES — Other Debts');
+    const debtItems = ['Child Maintenance','Tax Debt / HECS / HELP','Rent'];
+    const debtRows = debtItems.map((item, i) => {
+      const rows = document.querySelectorAll('#debts-table tbody tr');
+      const row = rows[i]; if (!row) return null;
+      const cells = row.querySelectorAll('input');
+      return [item,
+        cells[0]?.value ? `$${parseFloat(cells[0].value).toLocaleString('en-AU')}/mo` : '—',
+        cells[1]?.value ? `$${parseFloat(cells[1].value).toLocaleString('en-AU')}/mo` : '—',
+        cells[2]?.value ? `$${parseFloat(cells[2].value).toLocaleString('en-AU')}` : '—',
+      ];
+    }).filter(Boolean);
+
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin, right: margin },
+      head: [['Item','Current Payment','Ongoing Payment','Balance Owing']],
+      body: debtRows,
+      foot: [['TOTAL', document.getElementById('total-debt-curr').textContent, document.getElementById('total-debt-ongoing').textContent, document.getElementById('total-debt-bal').textContent]],
+      styles: { fontSize: 7.5, cellPadding: 2 },
+      headStyles: { fillColor:[238,243,248], textColor:[...grey], fontStyle:'bold', fontSize:7.5 },
+      footStyles: { fillColor:[...darkBlue], textColor:[255,255,255], fontStyle:'bold' },
+      columnStyles: { 0: { cellWidth: 50, fontStyle:'bold', fillColor:[248,250,252] } },
+    });
+
+    // ── Page 3: Expenses + Licence ──
+    doc.addPage();
+    y = 36;
+    doc.setFillColor(...darkBlue);
+    doc.rect(0, 0, W, 28, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(18); doc.setFont('helvetica', 'bold');
+    doc.text('ALERT CAPITAL', margin, 12);
+    doc.setFontSize(10); doc.setFont('helvetica', 'normal');
+    doc.text('FACT FINDER — HOME LOAN APPLICATION', margin, 19);
+    doc.setTextColor(0,0,0);
+
+    sectionHead('3.  MONTHLY EXPENSES');
+    const expenseRows = EXPENSE_CATS.map((cat, i) => {
       const v = val('exp_' + i);
-      return v ? `<tr><td style="padding:4px 8px;border-bottom:1px solid #eee;">${cat}</td><td style="padding:4px 8px;border-bottom:1px solid #eee;">$${parseFloat(v).toLocaleString('en-AU')}</td></tr>` : '';
-    }).join('');
+      return v ? [cat, `$${parseFloat(v).toLocaleString('en-AU')}`] : null;
+    }).filter(Boolean);
 
-    return `
-<div style="font-family:Arial,sans-serif;max-width:800px;color:#004471;">
-  <div style="background:#004471;color:white;padding:20px 24px;border-radius:8px 8px 0 0;">
-    <h1 style="margin:0;font-size:20px;">Alert Capital — Fact Finder Submission</h1>
-    <p style="margin:4px 0 0;opacity:0.7;font-size:13px;">Submitted: ${now}</p>
-  </div>
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin, right: margin },
+      head: [['Expense Category', 'Monthly Amount']],
+      body: expenseRows.length ? expenseRows : [['No expenses entered', '—']],
+      foot: [['TOTAL MONTHLY EXPENSES', document.getElementById('expense-total').textContent]],
+      styles: { fontSize: 8, cellPadding: 2.5 },
+      headStyles: { fillColor:[238,243,248], textColor:[...grey], fontStyle:'bold', fontSize:8 },
+      footStyles: { fillColor:[...darkBlue], textColor:[255,255,255], fontStyle:'bold' },
+      columnStyles: { 0: { cellWidth: 130 }, 1: { cellWidth: 52 } },
+    });
+    y = doc.lastAutoTable.finalY + 8;
 
-  <div style="background:#fff;border:1px solid #ddd;padding:24px;border-radius:0 0 8px 8px;">
+    if (licenceBase64 && licenceBase64.startsWith('data:image')) {
+      if (y > 220) { doc.addPage(); y = 20; }
+      doc.setFillColor(...blue);
+      doc.rect(margin, y, W - margin * 2, 7, 'F');
+      doc.setTextColor(255,255,255);
+      doc.setFontSize(9); doc.setFont('helvetica','bold');
+      doc.text("DRIVER'S LICENCE", margin + 3, y + 5);
+      doc.setTextColor(0,0,0);
+      y += 11;
+      const imgProps = doc.getImageProperties(licenceBase64);
+      const maxW = W - margin * 2, maxH = 70;
+      const ratio = Math.min(maxW / imgProps.width, maxH / imgProps.height);
+      doc.addImage(licenceBase64, 'JPEG', margin, y, imgProps.width * ratio, imgProps.height * ratio);
+    }
 
-    <h2 style="color:#0077B5;border-bottom:2px solid #0077B5;padding-bottom:6px;">1. Personal Details</h2>
+    const safeName = name1.replace(/[^a-z0-9]/gi, '-');
+    const fileName = `FactFinder-${safeName}-${dateStr}.pdf`;
+    doc.save(fileName);
+    return doc.output('blob');
+  }
 
-    <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
-      <tr style="background:#f0f2fa;">
-        <th style="padding:8px;text-align:left;font-size:12px;text-transform:uppercase;color:#4a4a6a;" colspan="2">Applicant 1 — ${radio('a1_role')}</th>
-        <th style="padding:8px;text-align:left;font-size:12px;text-transform:uppercase;color:#4a4a6a;" colspan="2">Applicant 2 — ${radio('a2_role')}</th>
-      </tr>
-      <tr>
-        <td style="padding:6px 8px;color:#666;font-size:12px;width:15%;">Name</td>
-        <td style="padding:6px 8px;font-weight:600;">${[val('a1_given'), val('a1_middle'), val('a1_surname')].filter(Boolean).join(' ') || '—'}</td>
-        <td style="padding:6px 8px;color:#666;font-size:12px;width:15%;">Name</td>
-        <td style="padding:6px 8px;font-weight:600;">${[val('a2_given'), val('a2_middle'), val('a2_surname')].filter(Boolean).join(' ') || '—'}</td>
-      </tr>
-      <tr style="background:#fafafa;">
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Mobile</td>
-        <td style="padding:6px 8px;">${val('a1_phone') || '—'}</td>
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Mobile</td>
-        <td style="padding:6px 8px;">${val('a2_phone') || '—'}</td>
-      </tr>
-      <tr>
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Email</td>
-        <td style="padding:6px 8px;">${val('a1_email') || '—'}</td>
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Email</td>
-        <td style="padding:6px 8px;">${val('a2_email') || '—'}</td>
-      </tr>
-      <tr style="background:#fafafa;">
-        <td style="padding:6px 8px;color:#666;font-size:12px;">DOB</td>
-        <td style="padding:6px 8px;">${val('a1_dob') || '—'}</td>
-        <td style="padding:6px 8px;color:#666;font-size:12px;">DOB</td>
-        <td style="padding:6px 8px;">${val('a2_dob') || '—'}</td>
-      </tr>
-      <tr>
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Marital Status</td>
-        <td style="padding:6px 8px;">${radio('a1_marital')}</td>
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Marital Status</td>
-        <td style="padding:6px 8px;">${radio('a2_marital')}</td>
-      </tr>
-      <tr style="background:#fafafa;">
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Employer</td>
-        <td style="padding:6px 8px;">${val('a1_employer') || '—'} (${val('a1_emp_length') || '—'})</td>
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Employer</td>
-        <td style="padding:6px 8px;">${val('a2_employer') || '—'} (${val('a2_emp_length') || '—'})</td>
-      </tr>
-      <tr>
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Address</td>
-        <td style="padding:6px 8px;">${val('a1_curr_addr') || '—'}</td>
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Address</td>
-        <td style="padding:6px 8px;">${val('a2_curr_addr') || '—'}</td>
-      </tr>
-      <tr style="background:#fafafa;">
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Prev. Address</td>
-        <td style="padding:6px 8px;">${val('a1_prev_addr') || '—'}</td>
-        <td style="padding:6px 8px;color:#666;font-size:12px;">Prev. Address</td>
-        <td style="padding:6px 8px;">${val('a2_prev_addr') || '—'}</td>
-      </tr>
-    </table>
+  // ── EMAIL NOTIFICATION TEXT ──
+  function buildEmailText(name1) {
+    const now = new Date().toLocaleString('en-AU', { dateStyle: 'full', timeStyle: 'short' });
+    const a2name = [val('a2_given'), val('a2_surname')].filter(Boolean).join(' ');
+    return `A new Fact Finder has been submitted.\n\nApplicant 1: ${name1}\n${a2name ? `Applicant 2: ${a2name}\n` : ''}Submitted: ${now}\nDriver's licence: ${licenceBase64 ? 'Attached' : 'Not provided'}\n\nPlease find the completed Fact Finder PDF attached to this email.`;
+  }
 
-    <h2 style="color:#0077B5;border-bottom:2px solid #0077B5;padding-bottom:6px;margin-top:24px;">2. Assets &amp; Liabilities</h2>
-    <p><strong>Total Asset Value:</strong> ${document.getElementById('total-asset-val').textContent} &nbsp;|&nbsp;
-       <strong>Total Loan Amount:</strong> ${document.getElementById('total-asset-loan').textContent} &nbsp;|&nbsp;
-       <strong>Total Monthly Payments:</strong> ${document.getElementById('total-asset-pmt').textContent}</p>
-    <p style="margin-top:8px;"><strong>Total Liabilities:</strong> ${document.getElementById('total-liab-bal').textContent} &nbsp;|&nbsp;
-       <strong>Total Monthly Liability Payments:</strong> ${document.getElementById('total-liab-pmt').textContent}</p>
-
-    <h2 style="color:#0077B5;border-bottom:2px solid #0077B5;padding-bottom:6px;margin-top:24px;">3. Monthly Expenses</h2>
-    <table style="width:100%;border-collapse:collapse;">
-      <tr style="background:#f0f2fa;">
-        <th style="padding:6px 8px;text-align:left;font-size:12px;text-transform:uppercase;color:#4a4a6a;">Category</th>
-        <th style="padding:6px 8px;text-align:left;font-size:12px;text-transform:uppercase;color:#4a4a6a;">Monthly Amount</th>
-      </tr>
-      ${expRows || '<tr><td colspan="2" style="padding:8px;color:#999;">No expenses entered.</td></tr>'}
-      <tr style="background:#004471;color:white;">
-        <td style="padding:8px;font-weight:700;">TOTAL</td>
-        <td style="padding:8px;font-weight:700;color:#f9c74f;">${document.getElementById('expense-total').textContent}</td>
-      </tr>
-    </table>
-
-    <h2 style="color:#0077B5;border-bottom:2px solid #0077B5;padding-bottom:6px;margin-top:24px;">Driver's Licence</h2>
-    ${licenceSection}
-
-  </div>
-</div>`;
+  // ── BASE64 → BLOB HELPER ──
+  function dataURLtoBlob(dataURL) {
+    const [header, data] = dataURL.split(',');
+    const mime = header.match(/:(.*?);/)[1];
+    const bytes = atob(data);
+    const arr = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+    return new Blob([arr], { type: mime });
   }
 
   // ── SUBMIT FORM ──
   async function submitForm() {
     if (!CONFIGURED) {
-      showStatus('error', 'EmailJS Not Configured', 'Please complete the one-time setup steps shown at the top of this page, then replace the three placeholder values in the HTML file.');
+      showStatus('error', 'Setup Required', 'Please complete the two-step Web3Forms setup shown at the top of this page.');
       return;
     }
 
@@ -927,18 +1041,39 @@
 
     const btn = document.getElementById('submit-btn');
     btn.disabled = true;
-    btn.textContent = 'Sending…';
+    btn.textContent = 'Generating PDF…';
+
+    const dateStr = new Date().toLocaleDateString('en-AU').replace(/\//g, '-');
 
     try {
-      const subject = `Fact Finder Submission — ${name1} — ${new Date().toLocaleDateString('en-AU')}`;
-      const message = buildEmailHTML();
+      const pdfBlob = generatePDF(name1, dateStr);
 
-      await emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, { subject, message });
+      btn.textContent = 'Sending…';
 
-      showStatus('success', 'Form Submitted Successfully!', `Your information has been sent directly to Alert Capital. They will be in touch with you shortly. You can print or save a copy using the button below.`);
-      btn.textContent = 'Submitted ✓';
+      const formData = new FormData();
+      formData.append('access_key', WEB3FORMS_KEY);
+      formData.append('subject', `Fact Finder — ${name1} — ${dateStr}`);
+      formData.append('from_name', name1);
+      formData.append('message', buildEmailText(name1));
+      formData.append('attachment[]', pdfBlob, `FactFinder-${name1.replace(/[^a-z0-9]/gi,'-')}-${dateStr}.pdf`);
+
+      if (licenceBase64 && licenceBase64.startsWith('data:image')) {
+        const licBlob = dataURLtoBlob(licenceBase64);
+        const ext = licenceFileName.split('.').pop() || 'jpg';
+        formData.append('attachment[]', licBlob, `DriversLicence-${name1.replace(/[^a-z0-9]/gi,'-')}.${ext}`);
+      }
+
+      const res = await fetch('https://api.web3forms.com/submit', { method: 'POST', body: formData });
+      const json = await res.json();
+
+      if (json.success) {
+        showStatus('success', 'Form Submitted Successfully!', 'Your completed Fact Finder has been sent as a PDF to Alert Capital. A copy has also been downloaded to your device. Alert Capital will be in touch with you shortly.');
+        btn.textContent = 'Submitted ✓';
+      } else {
+        throw new Error(json.message || 'Submission failed');
+      }
     } catch (err) {
-      console.error('EmailJS error:', err);
+      console.error('Submission error:', err);
       btn.disabled = false;
       btn.textContent = 'Submit Form';
       showStatus('error', 'Submission Failed', 'There was a problem sending your form. Please try again or contact Alert Capital directly.');
