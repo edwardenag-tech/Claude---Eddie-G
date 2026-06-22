@@ -12,26 +12,26 @@
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --red: #c0392b;
-    --red-light: #e74c3c;
-    --dark: #1a1a2e;
-    --mid: #4a4a6a;
-    --border: #d0d0e0;
-    --bg: #f7f8fc;
+    --red: #0077B5;
+    --red-light: #0a95dd;
+    --dark: #004471;
+    --mid: #5E6E82;
+    --border: #D0D7E0;
+    --bg: #F3F6F8;
     --white: #ffffff;
-    --section-bg: #f0f2fa;
+    --section-bg: #EEF3F8;
     --input-bg: #ffffff;
     --pill-active: var(--red);
     --pill-active-text: #fff;
-    --pill-inactive: #e8eaf2;
-    --pill-inactive-text: #4a4a6a;
+    --pill-inactive: #E1ECF4;
+    --pill-inactive-text: #5E6E82;
     --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
   }
 
   body {
     font-family: var(--font);
     background: var(--bg);
-    color: var(--dark);
+    color: #1D2226;
     font-size: 14px;
     line-height: 1.5;
   }
@@ -48,7 +48,7 @@
   #setup-banner .setup-icon { font-size: 20px; flex-shrink: 0; margin-top: 2px; }
   #setup-banner h3 { font-size: 13px; font-weight: 700; color: #856404; margin-bottom: 4px; }
   #setup-banner p { font-size: 12px; color: #856404; line-height: 1.5; }
-  #setup-banner a { color: #c0392b; font-weight: 600; }
+  #setup-banner a { color: #0077B5; font-weight: 600; }
   #setup-banner ol { margin: 6px 0 0 16px; font-size: 12px; color: #856404; }
   #setup-banner ol li { margin-bottom: 2px; }
   #setup-banner code {
@@ -326,13 +326,13 @@
   /* ── PRINT STYLES ── */
   @media print {
     body { background: white; font-size: 11px; }
-    header { background: #1a1a2e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    header { background: #004471 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     #setup-banner, .action-bar, #submit-status, .upload-area input[type="file"] { display: none !important; }
     main { margin: 0; padding: 0 8px 16px; max-width: 100%; }
     .section { page-break-inside: avoid; border: 1px solid #ccc; margin-bottom: 12px; }
     .applicant-grid, .expenses-grid { grid-template-columns: 1fr 1fr; }
-    .section-header, .total-row td, .expenses-total { background: #1a1a2e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    .pill-group input[type="radio"]:checked + label { background: #c0392b !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .section-header, .total-row td, .expenses-total { background: #004471 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .pill-group input[type="radio"]:checked + label { background: #0077B5 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     #licence-preview { display: block !important; }
   }
 </style>
@@ -810,8 +810,8 @@
 
     const licenceSection = licenceBase64
       ? (licenceBase64.startsWith('data:image')
-          ? `<h2 style="color:#c0392b;">Driver's Licence</h2><img src="${licenceBase64}" style="max-width:400px;border-radius:8px;border:1px solid #ddd;" alt="Licence"><br>`
-          : `<h2 style="color:#c0392b;">Driver's Licence</h2><p><em>PDF file attached: ${licenceFileName}</em></p>`)
+          ? `<h2 style="color:#0077B5;">Driver's Licence</h2><img src="${licenceBase64}" style="max-width:400px;border-radius:8px;border:1px solid #ddd;" alt="Licence"><br>`
+          : `<h2 style="color:#0077B5;">Driver's Licence</h2><p><em>PDF file attached: ${licenceFileName}</em></p>`)
       : '<p><em>No driver\'s licence uploaded.</em></p>';
 
     const expRows = EXPENSE_CATS.map((cat, i) => {
@@ -820,15 +820,15 @@
     }).join('');
 
     return `
-<div style="font-family:Arial,sans-serif;max-width:800px;color:#1a1a2e;">
-  <div style="background:#1a1a2e;color:white;padding:20px 24px;border-radius:8px 8px 0 0;">
+<div style="font-family:Arial,sans-serif;max-width:800px;color:#004471;">
+  <div style="background:#004471;color:white;padding:20px 24px;border-radius:8px 8px 0 0;">
     <h1 style="margin:0;font-size:20px;">Alert Capital — Fact Finder Submission</h1>
     <p style="margin:4px 0 0;opacity:0.7;font-size:13px;">Submitted: ${now}</p>
   </div>
 
   <div style="background:#fff;border:1px solid #ddd;padding:24px;border-radius:0 0 8px 8px;">
 
-    <h2 style="color:#c0392b;border-bottom:2px solid #c0392b;padding-bottom:6px;">1. Personal Details</h2>
+    <h2 style="color:#0077B5;border-bottom:2px solid #0077B5;padding-bottom:6px;">1. Personal Details</h2>
 
     <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
       <tr style="background:#f0f2fa;">
@@ -885,27 +885,27 @@
       </tr>
     </table>
 
-    <h2 style="color:#c0392b;border-bottom:2px solid #c0392b;padding-bottom:6px;margin-top:24px;">2. Assets &amp; Liabilities</h2>
+    <h2 style="color:#0077B5;border-bottom:2px solid #0077B5;padding-bottom:6px;margin-top:24px;">2. Assets &amp; Liabilities</h2>
     <p><strong>Total Asset Value:</strong> ${document.getElementById('total-asset-val').textContent} &nbsp;|&nbsp;
        <strong>Total Loan Amount:</strong> ${document.getElementById('total-asset-loan').textContent} &nbsp;|&nbsp;
        <strong>Total Monthly Payments:</strong> ${document.getElementById('total-asset-pmt').textContent}</p>
     <p style="margin-top:8px;"><strong>Total Liabilities:</strong> ${document.getElementById('total-liab-bal').textContent} &nbsp;|&nbsp;
        <strong>Total Monthly Liability Payments:</strong> ${document.getElementById('total-liab-pmt').textContent}</p>
 
-    <h2 style="color:#c0392b;border-bottom:2px solid #c0392b;padding-bottom:6px;margin-top:24px;">3. Monthly Expenses</h2>
+    <h2 style="color:#0077B5;border-bottom:2px solid #0077B5;padding-bottom:6px;margin-top:24px;">3. Monthly Expenses</h2>
     <table style="width:100%;border-collapse:collapse;">
       <tr style="background:#f0f2fa;">
         <th style="padding:6px 8px;text-align:left;font-size:12px;text-transform:uppercase;color:#4a4a6a;">Category</th>
         <th style="padding:6px 8px;text-align:left;font-size:12px;text-transform:uppercase;color:#4a4a6a;">Monthly Amount</th>
       </tr>
       ${expRows || '<tr><td colspan="2" style="padding:8px;color:#999;">No expenses entered.</td></tr>'}
-      <tr style="background:#1a1a2e;color:white;">
+      <tr style="background:#004471;color:white;">
         <td style="padding:8px;font-weight:700;">TOTAL</td>
         <td style="padding:8px;font-weight:700;color:#f9c74f;">${document.getElementById('expense-total').textContent}</td>
       </tr>
     </table>
 
-    <h2 style="color:#c0392b;border-bottom:2px solid #c0392b;padding-bottom:6px;margin-top:24px;">Driver's Licence</h2>
+    <h2 style="color:#0077B5;border-bottom:2px solid #0077B5;padding-bottom:6px;margin-top:24px;">Driver's Licence</h2>
     ${licenceSection}
 
   </div>
