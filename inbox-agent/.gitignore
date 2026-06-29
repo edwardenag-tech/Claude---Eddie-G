@@ -1,0 +1,13 @@
+# Environment — never commit real credentials
+.env
+
+# OAuth token caches (auto-generated, contain live tokens)
+gmail_token.json
+msal_token_cache.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
