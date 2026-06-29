@@ -45,15 +45,17 @@ CATEGORIES = ["lease_enquiry", "sale_enquiry", "vendor_update", "landlord_query"
 
 _FROM_NOISE = re.compile(
     r"no[_\-.]?reply|donotreply|mailer.daemon|postmaster|"
-    r"notifications?@|updates?@|alerts?@|marketing@|"
+    r"notifications?@|updates?@|alerts?@|marketing@|newsletter@|promo@|"
     r"bounce|sendgrid|mailchimp|constantcontact|hubspot|"
-    r"salesforce|marketo|campaign\.monitor",
+    r"salesforce|marketo|campaign\.monitor|grammarly|"
+    r"designline|realcommercial|commercialrealestate",
     re.IGNORECASE,
 )
 
 _SUBJECT_NOISE = re.compile(
     r"unsubscribe|newsletter|weekly digest|monthly (update|report)|"
-    r"promotional|special offer|deal of the",
+    r"promotional|special offer|deal of the|"
+    r"\d+%\s*off|discount|sale ends|promotion",
     re.IGNORECASE,
 )
 
@@ -108,6 +110,34 @@ def outlook_attachment_names(outlook: OutlookClient, msg_id: str) -> List[str]:
     if not result:
         return []
     return [a["name"] for a in result.get("value", []) if a.get("name")]
+
+
+def fetch_sent_enquiry_examples(outlook: OutlookClient) -> List[str]:
+    """Return up to 5 plain-text excerpts of past sent replies to enquiry emails."""
+    # Graph API rejects combining contains() filter with $orderby ("InefficientFilter"),
+    # so we fetch a larger page unordered and sort in Python.
+    params = {
+        "$filter": "contains(subject,'Enquiry')",
+        "$top": 20,
+        "$select": "subject,body,sentDateTime",
+    }
+    result = outlook._get("/me/mailFolders/sentitems/messages", params=params)
+    messages = result.get("value", []) if result else []
+    messages.sort(key=lambda m: m.get("sentDateTime", ""), reverse=True)
+    messages = messages[:5]
+
+    examples = []
+    for msg in messages:
+        subj = msg.get("subject", "")
+        body_obj = msg.get("body", {})
+        raw_body = body_obj.get("content", "") if isinstance(body_obj, dict) else ""
+        # Strip HTML tags and collapse whitespace
+        plain = re.sub(r"<[^>]+>", " ", raw_body)
+        plain = re.sub(r"\s{2,}", " ", plain).strip()
+        if plain:
+            examples.append(f"Subject: {subj}\n{plain[:800]}")
+
+    return examples
 
 
 def outlook_create_draft(
@@ -217,6 +247,7 @@ def claude_draft_reply(
     email: Dict,
     category: str,
     related_attachments: List[str],
+    style_examples: Optional[List[str]] = None,
 ) -> Tuple[str, str]:
     """Return (reply_subject, html_body) for a professional CRE reply."""
     category_context = {
@@ -244,6 +275,23 @@ def claude_draft_reply(
         names = ", ".join(related_attachments[:10])
         attachments_note = f"\n\nRelated documents found in the thread: {names}"
 
+    # Build style-matching block for enquiry categories
+    style_block = ""
+    is_enquiry = category in ("lease_enquiry", "sale_enquiry")
+    if is_enquiry and style_examples:
+        examples_text = "\n\n---\n".join(style_examples)
+        style_block = (
+            "\n\n--- Edward's past enquiry replies (style reference) ---\n"
+            f"{examples_text}\n\n"
+            "IMPORTANT: Replicate Edward's exact tone, greeting, structure, sign-off, "
+            "and style from these example replies. Do NOT write a generic CRE response "
+            "— match his personal style precisely."
+        )
+    elif is_enquiry:
+        style_block = (
+            "\n\n(No past enquiry replies found — use professional CRE style.)"
+        )
+
     prompt = (
         "You are drafting a professional reply on behalf of Edward Ghattas, "
         "commercial real estate agent at IB Property Sydney.\n\n"
@@ -251,12 +299,12 @@ def claude_draft_reply(
         f"From: {email.get('from_name', 'the sender')} <{email.get('from', '')}>\n"
         f"Subject: {email.get('subject', '')}\n"
         f"Body:\n{email.get('body', '')[:1500]}"
-        f"{attachments_note}\n\n"
+        f"{attachments_note}"
+        f"{style_block}\n\n"
         "--- Instructions ---\n"
         f"Context: {category_context.get(category, category_context['general'])}\n"
         "- Greet by first name where possible\n"
         "- Keep the reply under 180 words\n"
-        "- Use a professional, warm tone appropriate for commercial real estate\n"
         "- Sign off as:\n"
         "  Edward Ghattas\n"
         "  IB Property Sydney\n"
@@ -317,6 +365,11 @@ def main(max_emails: Optional[int] = None) -> None:
 
     ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+    # Fetch style examples from Sent Items (used for enquiry drafts)
+    logger.info("Fetching sent enquiry reply examples for style matching...")
+    sent_enquiry_examples = fetch_sent_enquiry_examples(outlook)
+    logger.info("Found %d past enquiry reply example(s)", len(sent_enquiry_examples))
+
     # Fetch last 48 hours from Inbox + "Front of Mind"
     logger.info("Fetching Outlook inbox + 'Front of Mind' (last 48 hours)...")
     raw_messages = outlook.get_recent_emails(since_days=2, extra_folders=["Front of Mind"])
@@ -342,7 +395,7 @@ def main(max_emails: Optional[int] = None) -> None:
             continue
 
         if is_automated(email):
-            logger.info("Skip (automated): %s | from=%s", subject, from_addr)
+            logger.info("SKIPPED (promotional): %s | from=%s", subject, from_addr)
             skipped += 1
             continue
 
@@ -371,8 +424,9 @@ def main(max_emails: Optional[int] = None) -> None:
             if related_attachments:
                 logger.info("  Related attachments: %s", related_attachments)
 
-        # 3. Draft reply via Claude
-        reply_subject, html_body = claude_draft_reply(ai, email, category, related_attachments)
+        # 3. Draft reply via Claude (pass style examples for enquiry categories)
+        examples = sent_enquiry_examples if category in ("lease_enquiry", "sale_enquiry") else None
+        reply_subject, html_body = claude_draft_reply(ai, email, category, related_attachments, style_examples=examples)
 
         # 4. Save to Outlook Drafts (threaded reply via createReply + PATCH)
         outlook_id = outlook_create_draft(
