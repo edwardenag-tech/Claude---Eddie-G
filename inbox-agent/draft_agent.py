@@ -8,6 +8,7 @@ Usage:
     python draft_agent.py
 """
 
+import html as _html
 import os
 import sys
 import base64
@@ -117,6 +118,9 @@ _LISTING_MARKERS = [
     "Asking Rent",
     "Floor Area",
     "IB Property is pleased",
+    "Price Guide",
+    "private treaty",
+    "Information Memorandum",
 ]
 
 
@@ -259,18 +263,15 @@ def _parse_property_fields(text: str, category: str) -> Dict[str, Optional[str]]
     _AREA_VAL = r'([\d,]+(?:\.\d+)?)'
     _AREA_UNIT = r'\s*(?:sqm|m²|m2|square\s+metres?)'
 
-    # ── Rent (lease) ───────────────────────────────────────────────────────────
+    # ── Rent (lease only) ─────────────────────────────────────────────────────
     if category == "lease_enquiry":
-        # Labelled: "Asking Rent: $70,000" or "Rent: $70,000"
         m = re.search(
             r'(?:asking\s+rent|rental|rent(?:al)?)\s*[:\-]?\s*' + _DOLLAR,
             text, re.IGNORECASE,
         )
         if not m:
-            # Amount + period suffix: "$70,000 p.a." / "$70,000 pa" / "per annum"
             m = re.search(_DOLLAR + r'\s*(?:p\.?a\.?|per\s+annum|pa\b)', text, re.IGNORECASE)
         if not m:
-            # Amount + gross/net qualifier: "$70,000 gross"
             m = re.search(_DOLLAR + r'[^.\n]{0,40}?(?:gross|net)', text, re.IGNORECASE)
         if m:
             raw_val = m.group(1)
@@ -285,23 +286,109 @@ def _parse_property_fields(text: str, category: str) -> Dict[str, Optional[str]]
             else:
                 found["asking_rent"] = f"${raw_val} p.a. gross + GST"
 
-    # ── Sale price ─────────────────────────────────────────────────────────────
+    # ── Sale-specific fields ───────────────────────────────────────────────────
     if category == "sale_enquiry":
+        # Current net rent
         m = re.search(
-            r'(?:asking\s+price|sale\s+price|price)\s*[:\-]?\s*' + _DOLLAR,
+            r'(?:current\s+net|net\s+rent|net\s+income|net\s+return)\s*[:\-]?\s*' + _DOLLAR,
             text, re.IGNORECASE,
         )
-        if not m:
-            m = re.search(r'offers?\s+(?:over|above|from)\s+' + _DOLLAR, text, re.IGNORECASE)
         if m:
-            found["asking_price"] = f"${m.group(1)}"
-        elif re.search(r'\bEOI\b|expressions?\s+of\s+interest', text, re.IGNORECASE):
+            found["net_rent"] = f"${m.group(1)} + GST"
+
+        # Estimated fully leased rent
+        m = re.search(
+            r'(?:(?:estimated\s+)?fully\s+leas(?:ed|t)|fully\s+let|'
+            r'potential\s+(?:net\s+)?(?:rent|income))(?:[^$\n]{0,60})?' + _DOLLAR,
+            text, re.IGNORECASE,
+        )
+        if m:
+            found["fully_leased_rent"] = f"${m.group(1)} + GST"
+
+        # Land area — explicit label, extracted BEFORE floor area to avoid confusion
+        m = re.search(
+            r'(?:land\s+area|site\s+area|land)\s*[:\-]?\s*' + _AREA_VAL + _AREA_UNIT,
+            text, re.IGNORECASE,
+        )
+        if m:
+            found["land_area"] = f"{m.group(1)} sqm*"
+
+        # Sale price / price guide — find ALL labelled matches, take the highest
+        # (listing price > contract price; avoids picking up contract-of-sale figures)
+        labelled_prices = re.findall(
+            r'(?:price\s+guide|asking\s+price|sale\s+price|for\s+sale|offers?\s+(?:over|above|from))\s*[:\-]?\s*'
+            + _DOLLAR,
+            text, re.IGNORECASE,
+        )
+        if labelled_prices:
+            try:
+                best = max(labelled_prices, key=lambda x: float(x.replace(",", "")))
+                found["asking_price"] = f"${best}"
+            except ValueError:
+                found["asking_price"] = f"${labelled_prices[0]}"
+        if not found.get("asking_price"):
+            for candidate in re.finditer(r'\$([\d]{1,3}(?:,[\d]{3})+(?:\.\d+)?)', text):
+                try:
+                    if float(candidate.group(1).replace(",", "")) >= 500_000:
+                        found["asking_price"] = f"${candidate.group(1)}"
+                        break
+                except ValueError:
+                    pass
+        if not found.get("asking_price") and re.search(r'\bEOI\b|expressions?\s+of\s+interest', text, re.IGNORECASE):
             found["asking_price"] = "EOI — Expressions of Interest"
 
+        # IM URL: heyzine first, then any flipbook URL, then any URL near IM keyword
+        im_m = re.search(r'(https?://heyzine\.com[^\s"<>]*)', text, re.IGNORECASE)
+        if not im_m:
+            im_m = re.search(r'(https?://[^\s"<>]*flipbook[^\s"<>]*)', text, re.IGNORECASE)
+        if not im_m:
+            im_m = re.search(
+                r'(?:information\s+memorandum|(?<!\w)IM(?!\w))[^\n]{0,300}?(https?://[^\s"<>]+)',
+                text, re.IGNORECASE | re.DOTALL,
+            )
+        if im_m:
+            found["im_url"] = im_m.group(1)
+
+        # Property type
+        m = re.search(
+            r'\b(freehold\s+investment|freehold\s+(?:commercial|retail|office|property)|'
+            r'commercial\s+(?:property|investment)|retail\s+investment|'
+            r'mixed[\s-]use(?:\s+investment)?|strata\s+title|industrial\s+(?:property|investment))\b',
+            text, re.IGNORECASE,
+        )
+        if m:
+            found["property_type"] = m.group(1).title()
+
+        # Lease terms — grab relevant sentences for Claude to reformat
+        lease_sents = re.findall(
+            r'[^.!?\n]*(?:(?:lease|tenancy)\s+(?:term|variation|extension|expires?|commenc)|'
+            r'tenant\s+(?:has|recently|signed)|option(?:s)?\s+(?:to\s+)?(?:renew|extend|purchase)|'
+            r'further\s+\d+\s*[×x]\s*\d+)[^.!?\n]*[.!?]?',
+            text, re.IGNORECASE,
+        )
+        if lease_sents:
+            found["lease_summary"] = " ".join(s.strip() for s in lease_sents[:3])
+
+        # Vacancy / value-add sentences (skip listing spec contamination)
+        _SPEC_MARKERS = re.compile(
+            r'land\s+area|floor\s+area|asking\s+rent|net\s+rent|price\s+guide|sqm|m²', re.IGNORECASE
+        )
+        vacancy_sents = [
+            s for s in re.findall(
+                r'[^.!?\n]{0,200}(?:vacant|vacancy|value[\s-]add|upstairs|level\s+1\s+(?:is\s+)?vacant|'
+                r'additional\s+income|income\s+(?:opportunity|potential)|currently\s+unoccupied)[^.!?\n]{0,200}[.!?]?',
+                text, re.IGNORECASE,
+            )
+            if not _SPEC_MARKERS.search(s)
+        ]
+        if vacancy_sents:
+            found["vacancy_note"] = " ".join(s.strip() for s in vacancy_sents[:2])
+
     # ── Internal floor area ────────────────────────────────────────────────────
+    # "area" and "size" deliberately excluded — too broad; would match "land area"
     m = re.search(
         r'(?:nla|gfa|internal\s+(?:floor\s+)?area|floor\s+area|'
-        r'lettable\s+area|net\s+lettable|gross\s+floor|area|size)\s*[:\-]?\s*'
+        r'(?:total\s+)?floor\s+(?:space|plate)|lettable\s+area|net\s+lettable|gross\s+floor)\s*[:\-]?\s*'
         + _AREA_VAL + _AREA_UNIT,
         text, re.IGNORECASE,
     )
@@ -317,15 +404,19 @@ def _parse_property_fields(text: str, category: str) -> Dict[str, Optional[str]]
     if m:
         found["external_area"] = f"{m.group(1)} sqm*"
 
-    # Fallback: any sqm values in document order → first = internal, second = external
+    # Fallback: unlabelled sqm values; skip the land_area value if already found
     if not found.get("internal_area"):
+        land_val = found.get("land_area", "").replace(" sqm*", "") if found.get("land_area") else None
         all_areas = re.findall(_AREA_VAL + _AREA_UNIT, text, re.IGNORECASE)
-        if all_areas:
-            found["internal_area"] = f"{all_areas[0]} sqm*"
-            if len(all_areas) > 1 and not found.get("external_area"):
-                found["external_area"] = f"{all_areas[1]} sqm*"
+        remaining = [a for a in all_areas if a != land_val] if land_val else all_areas
+        if remaining:
+            found["internal_area"] = f"{remaining[0]} sqm*"
+            if len(remaining) > 1 and not found.get("external_area"):
+                found["external_area"] = f"{remaining[1]} sqm*"
 
     # ── Building name ──────────────────────────────────────────────────────────
+    _GENERIC_WORDS = {'the', 'this', 'that', 'here', 'there', 'conversation',
+                      'development', 'building', 'complex', 'property', 'address'}
     for pat in [
         r'\b(Sirius[^,.\n]*)',
         r'award[- ]winning\s+([A-Z][A-Za-z0-9\s]+?)(?:\s+development|\s+building|\s+complex|[,.\n])',
@@ -334,22 +425,25 @@ def _parse_property_fields(text: str, category: str) -> Dict[str, Optional[str]]
     ]:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
-            found["building_name"] = m.group(1).strip()
-            break
+            name = m.group(1).strip()
+            # Reject if first character isn't actually uppercase (IGNORECASE made [A-Z] match lower)
+            if name and name[0].isupper() and name.lower() not in _GENERIC_WORDS:
+                found["building_name"] = name
+                break
 
     # ── Outgoings ──────────────────────────────────────────────────────────────
     m = re.search(r'outgoings?\s*[:\-]?\s*' + _DOLLAR + r'[^.\n]{0,20}', text, re.IGNORECASE)
     if m:
         found["outgoings"] = f"${m.group(1)} p.a."
 
-    # ── Car spaces ─────────────────────────────────────────────────────────────
+    # ── Car spaces — store raw number; template decides formatting ─────────────
     m = re.search(
-        r'(\d+)\s*(?:car\s+(?:space|park|bay)s?|parking\s+(?:space|bay)s?)',
+        r'(?:secure\s+)?(?:parking\s+for\s+(\d+)|(\d+)\s*(?:car\s+(?:space|park|bay)s?|'
+        r'parking\s+(?:space|bay)s?))',
         text, re.IGNORECASE,
     )
     if m:
-        n = int(m.group(1))
-        found["car_spaces"] = f"{n} car space{'s' if n > 1 else ''}"
+        found["car_spaces"] = str(int(m.group(1) or m.group(2)))
 
     # ── Zoning ─────────────────────────────────────────────────────────────────
     m = re.search(
@@ -393,9 +487,10 @@ def _search_folder_body(
 
 
 def _body_to_plain(msg: Dict) -> str:
-    """Extract and flatten HTML body from a Graph message dict."""
+    """Extract and flatten HTML body from a Graph message dict, decoding HTML entities."""
     raw = msg.get("body", {}).get("content", "") if isinstance(msg.get("body"), dict) else ""
-    plain = re.sub(r"<[^>]+>", " ", raw)
+    decoded = _html.unescape(raw).replace("\xa0", " ")  # &nbsp; → space
+    plain = re.sub(r"<[^>]+>", " ", decoded)
     return re.sub(r"\s{2,}", " ", plain).strip()
 
 
@@ -413,8 +508,19 @@ def collect_property_data(
     """
     details: Dict[str, Optional[str]] = {
         "address": None,
+        "suburb": None,
+        # lease
         "asking_rent": None,
+        # sale
         "asking_price": None,
+        "net_rent": None,
+        "fully_leased_rent": None,
+        "land_area": None,
+        "property_type": None,
+        "im_url": None,
+        "lease_summary": None,
+        "vacancy_note": None,
+        # shared
         "internal_area": None,
         "external_area": None,
         "building_name": None,
@@ -428,13 +534,28 @@ def collect_property_data(
     # ── Address first — needed for subsequent searches ─────────────────────────
     details["address"] = _extract_address(subject, email.get("body", ""))
 
+    # Extract suburb from address (e.g. "14A Hannah Street, Beecroft NSW 2119" → "Beecroft")
+    if details["address"]:
+        sm = re.search(
+            r',\s*([A-Z][A-Za-z\s]+?)\s+(?:NSW|VIC|QLD|SA|WA|TAS|ACT|NT)\b',
+            details["address"], re.IGNORECASE,
+        )
+        if not sm:
+            # Address without state: "14a Hannah St, Beecroft" → last comma-separated word(s)
+            sm = re.search(
+                r',\s*([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)\s*(?:\d{4})?$',
+                details["address"].strip(), re.IGNORECASE,
+            )
+        if sm:
+            details["suburb"] = sm.group(1).strip()
+
     # ── Source A: enquiry email, raw HTML ─────────────────────────────────────
     raw_html = (
         raw_message.get("body", {}).get("content", "")
         if isinstance(raw_message.get("body"), dict)
         else ""
     )
-    html_plain = re.sub(r"\s{2,}", " ", re.sub(r"<[^>]+>", " ", raw_html)).strip()
+    html_plain = re.sub(r"\s{2,}", " ", re.sub(r"<[^>]+>", " ", _html.unescape(raw_html).replace("\xa0", " "))).strip()
     _merge_into(details, _parse_property_fields(f"{subject}\n{html_plain}", category))
     logger.debug("  [A] After email body: %s", {k: v for k, v in details.items() if v})
 
@@ -466,12 +587,23 @@ def collect_property_data(
     # ── Fallback placeholders for still-missing key fields ─────────────────────
     if not details.get("address"):
         details["address"] = "[PLEASE ADD - PROPERTY ADDRESS]"
-    if category == "lease_enquiry" and not details.get("asking_rent"):
-        details["asking_rent"] = "[PLEASE ADD - RENT/PRICE]"
-    if category == "sale_enquiry" and not details.get("asking_price"):
-        details["asking_price"] = "[PLEASE ADD - SALE PRICE]"
     if not details.get("internal_area"):
         details["internal_area"] = "[PLEASE ADD - SIZE]"
+
+    if category == "lease_enquiry":
+        if not details.get("asking_rent"):
+            details["asking_rent"] = "[PLEASE ADD - RENT/PRICE]"
+    elif category == "sale_enquiry":
+        if not details.get("asking_price"):
+            details["asking_price"] = "[PLEASE ADD - SALE PRICE]"
+        if not details.get("net_rent"):
+            details["net_rent"] = "[PLEASE ADD - NET RENT]"
+        if not details.get("im_url"):
+            details["im_url"] = "[PLEASE ADD - IM LINK]"
+        if not details.get("property_type"):
+            details["property_type"] = "Freehold Investment"
+        if not details.get("suburb"):
+            details["suburb"] = "[SUBURB]"
 
     return details
 
@@ -520,9 +652,7 @@ def claude_draft_reply(
         names = ", ".join(related_attachments[:10])
         attachments_note = f"\n\nRelated documents found in the thread: {names}"
 
-    is_enquiry = category in ("lease_enquiry", "sale_enquiry")
-
-    if is_enquiry:
+    if category == "lease_enquiry":
         ld = listing_details or {}
         address = ld.get("address") or "[PLEASE ADD - PROPERTY ADDRESS]"
         building_name = ld.get("building_name")
@@ -534,41 +664,22 @@ def claude_draft_reply(
             else "industrial" if "industrial" in body_lower
             else "commercial"
         )
-        action_type = "for lease" if category == "lease_enquiry" else "for sale"
 
-        # Build dynamic highlights block (lease vs sale)
-        highlights: List[str] = []
-        if category == "lease_enquiry":
-            highlights.append(
-                f"• Asking Rent: {ld.get('asking_rent') or '[PLEASE ADD - RENT/PRICE]'}"
-            )
-            highlights.append(
-                f"• Internal Floor Area: {ld.get('internal_area') or '[PLEASE ADD - SIZE]'}"
-            )
-            if ld.get("external_area"):
-                highlights.append(f"• External Area: {ld['external_area']}")
-            if ld.get("outgoings"):
-                highlights.append(f"• Outgoings: {ld['outgoings']}")
-            if ld.get("car_spaces"):
-                highlights.append(f"• Car Spaces: {ld['car_spaces']}")
-        else:  # sale_enquiry
-            highlights.append(
-                f"• Asking Price: {ld.get('asking_price') or '[PLEASE ADD - SALE PRICE]'}"
-            )
-            highlights.append(
-                f"• Internal Floor Area: {ld.get('internal_area') or '[PLEASE ADD - SIZE]'}"
-            )
-            if ld.get("external_area"):
-                highlights.append(f"• External Area: {ld['external_area']}")
-            if ld.get("zoning"):
-                highlights.append(f"• Zoning: {ld['zoning']}")
-            if ld.get("car_spaces"):
-                highlights.append(f"• Car Spaces: {ld['car_spaces']}")
+        highlights: List[str] = [
+            f"• Asking Rent: {ld.get('asking_rent') or '[PLEASE ADD - RENT/PRICE]'}",
+            f"• Internal Floor Area: {ld.get('internal_area') or '[PLEASE ADD - SIZE]'}",
+        ]
+        if ld.get("external_area"):
+            highlights.append(f"• External Area: {ld['external_area']}")
+        if ld.get("outgoings"):
+            highlights.append(f"• Outgoings: {ld['outgoings']}")
+        if ld.get("car_spaces"):
+            n = ld["car_spaces"]
+            highlights.append(f"• Car Spaces: {n} car space{'s' if n != '1' else ''}")
         if building_name:
             highlights.append(f"• Part of the award-winning {building_name} development")
         highlights_str = "\n".join(highlights)
 
-        # "Nestled within..." paragraph only when building name is known
         nestled_para = (
             f"Nestled within the {building_name}, this is a rare chance to secure a "
             "premium position in one of Sydney's most iconic precincts.\n\n"
@@ -579,8 +690,7 @@ def claude_draft_reply(
             examples_text = "\n\n---\n".join(style_examples)
             style_block = (
                 "\n\n--- Edward's past listing replies (style reference) ---\n"
-                f"{examples_text}\n"
-                "--- End style reference ---"
+                f"{examples_text}\n--- End style reference ---"
             )
 
         prompt = (
@@ -593,11 +703,12 @@ def claude_draft_reply(
             f"{attachments_note}"
             f"{style_block}\n\n"
             "--- EXACT TEMPLATE TO USE ---\n"
-            "Reproduce this structure EXACTLY — do not add, remove, or reorder any section:\n\n"
+            "Reproduce this structure EXACTLY. Fill in [sender's first name]. "
+            "Leave any [PLEASE ADD - X] untouched:\n\n"
             "Hi [sender's first name],\n\n"
             "Hope all is well.\n\n"
             f"IB Property is pleased to bring to market {address}, an exceptional "
-            f"{prop_type} opportunity available {action_type}.\n\n"
+            f"{prop_type} opportunity available for lease.\n\n"
             f"{nestled_para}"
             "**Property Highlights**\n"
             f"{highlights_str}\n\n"
@@ -608,11 +719,96 @@ def claude_draft_reply(
             "IB Property Sydney\n"
             "edward@ibproperty.com.au\n\n"
             "--- RENDERING INSTRUCTIONS ---\n"
-            "- Replace [sender's first name] with the actual first name from the From field\n"
-            "- Any value shown as [PLEASE ADD - X] must remain exactly as-is in the output\n"
             "- Return ONLY the HTML body using <p>, <strong>, and <br> tags\n"
             "- Render '**Property Highlights**' as <strong>Property Highlights</strong>\n"
-            "- Each bullet point on its own line with a • character\n"
+            "- Each bullet on its own line with a • character\n"
+            "- Do not include a subject line"
+        )
+
+    elif category == "sale_enquiry":
+        ld = listing_details or {}
+        address = ld.get("address") or "[PLEASE ADD - PROPERTY ADDRESS]"
+        property_type = ld.get("property_type") or "Freehold Investment"
+        suburb = ld.get("suburb") or "[SUBURB]"
+
+        # Build the bullet list
+        bullets: List[str] = []
+        if ld.get("net_rent"):
+            bullets.append(f"• Current net rent: {ld['net_rent']}")
+        if ld.get("fully_leased_rent"):
+            bullets.append(f"• Estimated Fully Leased net rent: {ld['fully_leased_rent']}")
+        if ld.get("land_area"):
+            bullets.append(f"• Land area: {ld['land_area']}")
+        bullets.append(f"• Floor area: {ld.get('internal_area') or '[PLEASE ADD - SIZE]'}")
+        if ld.get("car_spaces"):
+            n = ld["car_spaces"]
+            bullets.append(f"• Secure parking for {n} car{'s' if n != '1' else ''}")
+        bullets.append(
+            f"• Prime location near {suburb} village, train station, cafés, restaurants, and amenities"
+        )
+        bullets_str = "\n".join(bullets)
+
+        # Lease paragraph (extracted sentences, Claude reformats to final paragraph)
+        if ld.get("lease_summary"):
+            lease_para = f"{ld['lease_summary']}\n\n"
+        else:
+            lease_para = ""
+
+        # Vacancy paragraph (use extracted text verbatim)
+        if ld.get("vacancy_note"):
+            vacancy_para = f"{ld['vacancy_note']}\n\n"
+        else:
+            vacancy_para = ""
+
+        # Price and IM
+        price_val = ld.get("asking_price") or "[PLEASE ADD - SALE PRICE]"
+        if price_val.startswith("["):
+            price_str = price_val
+        else:
+            price_str = f"{price_val} + GST"
+        im_url = ld.get("im_url") or "[PLEASE ADD - IM LINK]"
+
+        style_block = ""
+        if style_examples:
+            examples_text = "\n\n---\n".join(style_examples)
+            style_block = (
+                "\n\n--- Edward's past sale replies (style reference) ---\n"
+                f"{examples_text}\n--- End style reference ---"
+            )
+
+        prompt = (
+            "You are drafting a reply on behalf of Edward Ghattas, "
+            "commercial real estate agent at IB Property Sydney.\n\n"
+            "--- Original email ---\n"
+            f"From: {email.get('from_name', 'the sender')} <{email.get('from', '')}>\n"
+            f"Subject: {email.get('subject', '')}\n"
+            f"Body:\n{email.get('body', '')[:1200]}"
+            f"{attachments_note}"
+            f"{style_block}\n\n"
+            "--- EXACT TEMPLATE TO USE ---\n"
+            "Reproduce this structure EXACTLY. Fill in [sender's first name]. "
+            "Leave any [PLEASE ADD - X] untouched:\n\n"
+            "Hi [sender's first name],\n\n"
+            "Hope you are well.\n\n"
+            f"IB Property is pleased to present {address}, to the market for sale via "
+            f"private treaty, an exceptional {property_type}.\n\n"
+            f"{bullets_str}\n\n"
+            f"{lease_para}"
+            f"{vacancy_para}"
+            "**Price Guide**\n\n"
+            f"For sale {price_str}\n\n"
+            "**Information Memorandum:**\n\n"
+            f"{im_url}\n\n"
+            "We look forward to hearing from you.\n\n"
+            "Edward Ghattas\n"
+            "IB Property Sydney\n"
+            "edward@ibproperty.com.au\n\n"
+            "--- RENDERING INSTRUCTIONS ---\n"
+            "- Return ONLY the HTML body using <p>, <strong>, and <br> tags\n"
+            "- Render '**Price Guide**' as <strong>Price Guide</strong>\n"
+            "- Render '**Information Memorandum:**' as <strong>Information Memorandum:</strong>\n"
+            "- Each bullet on its own line with a • character\n"
+            "- Reproduce the lease and vacancy paragraphs exactly as given, do not rephrase\n"
             "- Do not include a subject line"
         )
     else:
@@ -650,7 +846,7 @@ def claude_draft_reply(
     try:
         response = ai.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=800,
+            max_tokens=1200,
             messages=[{"role": "user", "content": prompt}],
         )
         html_body = response.content[0].text.strip()
@@ -838,7 +1034,8 @@ def test_draft(max_scan: int = 20, subject_filter: str = "") -> None:
     raw_messages = outlook.get_recent_emails(since_days=30, extra_folders=["Front of Mind"])
     logger.info("Total messages fetched: %d", len(raw_messages))
 
-    for raw in raw_messages[:max_scan]:
+    scan_limit = len(raw_messages) if subject_filter else max_scan
+    for raw in raw_messages[:scan_limit]:
         email = OutlookClient.extract_email_data(raw)
         if is_self_sent(email) or is_automated(email):
             continue
