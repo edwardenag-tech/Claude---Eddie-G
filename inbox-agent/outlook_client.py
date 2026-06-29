@@ -23,7 +23,6 @@ SCOPES = [
     "Mail.ReadWrite",
     "Mail.Send",
     "User.Read",
-    "offline_access",
 ]
 
 
@@ -141,7 +140,7 @@ class OutlookClient:
             "$orderby": "receivedDateTime desc",
             "$select": (
                 "id,subject,from,receivedDateTime,isRead,importance,"
-                "bodyPreview,body,hasAttachments"
+                "bodyPreview,body,hasAttachments,conversationId,internetMessageId"
             ),
         }
         if filter_query:
