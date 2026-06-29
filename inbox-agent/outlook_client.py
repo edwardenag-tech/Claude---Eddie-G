@@ -159,6 +159,23 @@ class OutlookClient:
                 return folder["id"]
         return None
 
+    def _find_subfolder_id(self, parent_folder: str, child_name: str) -> Optional[str]:
+        """Return the ID of a named child folder under parent_folder.
+
+        parent_folder may be a well-known name (e.g. 'inbox') or a folder ID.
+        Uses GET /me/mailFolders/{parent}/childFolders.
+        """
+        result = self._get(
+            f"/me/mailFolders/{parent_folder}/childFolders",
+            params={"$top": 100, "$select": "id,displayName"},
+        )
+        if not result:
+            return None
+        for folder in result.get("value", []):
+            if folder.get("displayName", "").lower() == child_name.lower():
+                return folder["id"]
+        return None
+
     def get_recent_emails(self, since_days: int = 1, extra_folders: List[str] = None) -> List[Dict]:
         """Emails from Inbox (and any named extra folders) in the last N days.
 
@@ -172,6 +189,16 @@ class OutlookClient:
 
         messages = self.get_messages(folder="inbox", filter_query=filter_q, top=100)
         seen_ids = {m["id"] for m in messages}
+
+        fom_id = self._find_subfolder_id("inbox", "Front Of Mind")
+        if fom_id:
+            logger.info("Fetching from 'Front Of Mind' subfolder of Inbox...")
+            for m in self.get_messages(folder=fom_id, filter_query=filter_q, top=100):
+                if m["id"] not in seen_ids:
+                    seen_ids.add(m["id"])
+                    messages.append(m)
+        else:
+            logger.warning("'Front Of Mind' subfolder not found under Inbox")
 
         for folder_name in (extra_folders or []):
             folder_id = self._find_folder_id(folder_name)
