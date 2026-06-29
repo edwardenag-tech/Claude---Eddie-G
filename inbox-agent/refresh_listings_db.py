@@ -116,6 +116,8 @@ def extract_listings_with_claude(
         raw = response.content[0].text.strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"\s*```$", "", raw)
+        if not raw:
+            return []
         listings = json.loads(raw)
         for listing in listings:
             listing["last_updated"] = today
