@@ -149,16 +149,43 @@ class OutlookClient:
         result = self._get(f"/me/mailFolders/{folder}/messages", params=params)
         return result.get("value", []) if result else []
 
-    def get_recent_emails(self, since_days: int = 1) -> List[Dict]:
-        """Emails received in the last N days from all folders (inbox focus)."""
+    def _find_folder_id(self, display_name: str) -> Optional[str]:
+        """Return folder ID by display name (case-insensitive). None if not found."""
+        result = self._get("/me/mailFolders", params={"$top": 100, "$select": "id,displayName"})
+        if not result:
+            return None
+        for folder in result.get("value", []):
+            if folder.get("displayName", "").lower() == display_name.lower():
+                return folder["id"]
+        return None
+
+    def get_recent_emails(self, since_days: int = 1, extra_folders: List[str] = None) -> List[Dict]:
+        """Emails from Inbox (and any named extra folders) in the last N days.
+
+        extra_folders: list of top-level folder display names to include alongside Inbox.
+        Folders that don't exist are skipped with a warning.
+        """
         after_dt = (datetime.utcnow() - timedelta(days=since_days)).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
-        return self.get_messages(
-            folder="inbox",
-            filter_query=f"receivedDateTime ge {after_dt}",
-            top=100,
-        )
+        filter_q = f"receivedDateTime ge {after_dt}"
+
+        messages = self.get_messages(folder="inbox", filter_query=filter_q, top=100)
+        seen_ids = {m["id"] for m in messages}
+
+        for folder_name in (extra_folders or []):
+            folder_id = self._find_folder_id(folder_name)
+            if not folder_id:
+                logger.warning("Outlook folder not found, skipping: %r", folder_name)
+                continue
+            logger.info("Fetching from folder %r...", folder_name)
+            extras = self.get_messages(folder=folder_id, filter_query=filter_q, top=100)
+            for m in extras:
+                if m["id"] not in seen_ids:
+                    seen_ids.add(m["id"])
+                    messages.append(m)
+
+        return messages
 
     def get_old_read_emails(self, older_than_days: int = 7) -> List[Dict]:
         """Read emails older than N days still in the inbox."""

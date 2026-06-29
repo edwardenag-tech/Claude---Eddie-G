@@ -317,9 +317,9 @@ def main(max_emails: Optional[int] = None) -> None:
 
     ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    # Fetch last 48 hours of Outlook inbox
-    logger.info("Fetching Outlook inbox (last 48 hours)...")
-    raw_messages = outlook.get_recent_emails(since_days=2)
+    # Fetch last 48 hours from Inbox + "Front of Mind"
+    logger.info("Fetching Outlook inbox + 'Front of Mind' (last 48 hours)...")
+    raw_messages = outlook.get_recent_emails(since_days=2, extra_folders=["Front of Mind"])
     logger.info("Retrieved %d messages", len(raw_messages))
 
     drafted = 0
