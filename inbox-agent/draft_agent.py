@@ -218,79 +218,260 @@ def extract_property_hint(subject: str) -> Optional[str]:
     return cleaned[:60] if len(cleaned) > 5 else None
 
 
-# ─── Listing detail extraction ───────────────────────────────────────────────
+# ─── Listing detail extraction ────────────────────────────────────────────────
 
-def extract_listing_details(email: Dict) -> Dict[str, Optional[str]]:
-    """Extract structured property data from a commercial enquiry email body."""
-    subject = email.get("subject", "")
-    body = email.get("body", "")
+_STREET_TYPES = (
+    r'Street|St|Road|Rd|Avenue|Ave|Drive|Dr|Lane|Ln|Place|Pl|Way|'
+    r'Highway|Hwy|Crescent|Cres|Boulevard|Blvd|Parade|Pde|Court|Ct|'
+    r'Close|Circuit|Cct|Terrace|Tce'
+)
+
+
+def _extract_address(subject: str, body: str) -> Optional[str]:
+    """Pull property address out of subject or body text."""
     combined = f"{subject}\n{body}"
+    # realcommercial.com.au: "Property ID: 12345, ADDRESS, Contacted"
+    m = re.search(r'Property ID:\s*\d+,\s*(.+?),\s*Contacted', combined, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # commercialrealestate.com.au: "New Enquiry - ADDRESS Contacted: NAME"
+    m = re.search(r'New\s+Enquiry\s*[-–]\s*(.+?)\s+Contacted:', combined, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # Generic: "for/at/about NUMBER ... STREET_TYPE"
+    m = re.search(
+        rf'(?:for|at|about|regarding)\s+(\d+[^,\n]+?(?:{_STREET_TYPES})[^,\n]*(?:,\s*[A-Z][A-Za-z\s]+)?)',
+        combined, re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip()
+    # Subject line contains a street address
+    subj_clean = re.sub(r'^(re|fwd?|enquiry):\s*', '', subject, flags=re.IGNORECASE).strip()
+    if re.search(rf'\d+.*(?:{_STREET_TYPES})', subj_clean, re.IGNORECASE):
+        return subj_clean[:120]
+    return None
 
+
+def _parse_property_fields(text: str, category: str) -> Dict[str, Optional[str]]:
+    """Run regex patterns on text to extract commercial property data fields."""
+    found: Dict[str, Optional[str]] = {}
+    _DOLLAR = r'\$([\d,]+(?:\.\d+)?(?:k|K|m|M)?)'
+    _AREA_VAL = r'([\d,]+(?:\.\d+)?)'
+    _AREA_UNIT = r'\s*(?:sqm|m²|m2|square\s+metres?)'
+
+    # ── Rent (lease) ───────────────────────────────────────────────────────────
+    if category == "lease_enquiry":
+        # Labelled: "Asking Rent: $70,000" or "Rent: $70,000"
+        m = re.search(
+            r'(?:asking\s+rent|rental|rent(?:al)?)\s*[:\-]?\s*' + _DOLLAR,
+            text, re.IGNORECASE,
+        )
+        if not m:
+            # Amount + period suffix: "$70,000 p.a." / "$70,000 pa" / "per annum"
+            m = re.search(_DOLLAR + r'\s*(?:p\.?a\.?|per\s+annum|pa\b)', text, re.IGNORECASE)
+        if not m:
+            # Amount + gross/net qualifier: "$70,000 gross"
+            m = re.search(_DOLLAR + r'[^.\n]{0,40}?(?:gross|net)', text, re.IGNORECASE)
+        if m:
+            raw_val = m.group(1)
+            if re.search(r'p\.?c\.?m\.?|per\s+month', m.group(0), re.IGNORECASE):
+                try:
+                    monthly = float(raw_val.replace(",", "").rstrip("kKmM"))
+                    if raw_val.lower().endswith("k"):
+                        monthly *= 1000
+                    found["asking_rent"] = f"${int(monthly * 12):,} p.a. gross + GST"
+                except ValueError:
+                    found["asking_rent"] = f"${raw_val} p.a. gross + GST"
+            else:
+                found["asking_rent"] = f"${raw_val} p.a. gross + GST"
+
+    # ── Sale price ─────────────────────────────────────────────────────────────
+    if category == "sale_enquiry":
+        m = re.search(
+            r'(?:asking\s+price|sale\s+price|price)\s*[:\-]?\s*' + _DOLLAR,
+            text, re.IGNORECASE,
+        )
+        if not m:
+            m = re.search(r'offers?\s+(?:over|above|from)\s+' + _DOLLAR, text, re.IGNORECASE)
+        if m:
+            found["asking_price"] = f"${m.group(1)}"
+        elif re.search(r'\bEOI\b|expressions?\s+of\s+interest', text, re.IGNORECASE):
+            found["asking_price"] = "EOI — Expressions of Interest"
+
+    # ── Internal floor area ────────────────────────────────────────────────────
+    m = re.search(
+        r'(?:nla|gfa|internal\s+(?:floor\s+)?area|floor\s+area|'
+        r'lettable\s+area|net\s+lettable|gross\s+floor|area|size)\s*[:\-]?\s*'
+        + _AREA_VAL + _AREA_UNIT,
+        text, re.IGNORECASE,
+    )
+    if m:
+        found["internal_area"] = f"{m.group(1)} sqm*"
+
+    # ── External area ──────────────────────────────────────────────────────────
+    m = re.search(
+        r'(?:external|outdoor|alfresco|terrace|balcony)\s*(?:area|space)?\s*[:\-]?\s*'
+        + _AREA_VAL + _AREA_UNIT,
+        text, re.IGNORECASE,
+    )
+    if m:
+        found["external_area"] = f"{m.group(1)} sqm*"
+
+    # Fallback: any sqm values in document order → first = internal, second = external
+    if not found.get("internal_area"):
+        all_areas = re.findall(_AREA_VAL + _AREA_UNIT, text, re.IGNORECASE)
+        if all_areas:
+            found["internal_area"] = f"{all_areas[0]} sqm*"
+            if len(all_areas) > 1 and not found.get("external_area"):
+                found["external_area"] = f"{all_areas[1]} sqm*"
+
+    # ── Building name ──────────────────────────────────────────────────────────
+    for pat in [
+        r'\b(Sirius[^,.\n]*)',
+        r'award[- ]winning\s+([A-Z][A-Za-z0-9\s]+?)(?:\s+development|\s+building|\s+complex|[,.\n])',
+        r'(?:located\s+(?:in|within)|nestled\s+(?:in|within)|part\s+of)\s+the\s+([A-Z][A-Za-z0-9\s]+?)(?:\s+development|\s+building|\s+complex|[,.\n])',
+        r'\bthe\s+([A-Z][A-Za-z0-9\s]+(?:Centre|Center|Tower|Building|Plaza|House|Court|Arcade|Mall))',
+    ]:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            found["building_name"] = m.group(1).strip()
+            break
+
+    # ── Outgoings ──────────────────────────────────────────────────────────────
+    m = re.search(r'outgoings?\s*[:\-]?\s*' + _DOLLAR + r'[^.\n]{0,20}', text, re.IGNORECASE)
+    if m:
+        found["outgoings"] = f"${m.group(1)} p.a."
+
+    # ── Car spaces ─────────────────────────────────────────────────────────────
+    m = re.search(
+        r'(\d+)\s*(?:car\s+(?:space|park|bay)s?|parking\s+(?:space|bay)s?)',
+        text, re.IGNORECASE,
+    )
+    if m:
+        n = int(m.group(1))
+        found["car_spaces"] = f"{n} car space{'s' if n > 1 else ''}"
+
+    # ── Zoning ─────────────────────────────────────────────────────────────────
+    m = re.search(
+        r'(?:zone[d]?|zoning)\s*[:\-]?\s*([A-Z][A-Za-z0-9\s/]+?)(?:\s*\(|\s*$|[,.\n])',
+        text, re.IGNORECASE,
+    )
+    if m:
+        found["zoning"] = m.group(1).strip()
+
+    return found
+
+
+def _merge_into(base: Dict, update: Dict) -> None:
+    """Fill None values in base from update without overwriting existing values."""
+    for k, v in update.items():
+        if v and not base.get(k):
+            base[k] = v
+
+
+def _shorten_address(address: Optional[str]) -> Optional[str]:
+    """Extract a short search-friendly address string (number + street name + type)."""
+    if not address:
+        return None
+    m = re.search(rf'(\d+\s+\w+\s+(?:{_STREET_TYPES}))', address, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return address[:40]
+
+
+def _search_folder_body(
+    outlook: OutlookClient, endpoint: str, query: str, top: int = 5
+) -> List[Dict]:
+    """Run a $search query on a Graph messages endpoint and return messages with body."""
+    params = {
+        "$search": f'"{query}"',
+        "$top": top,
+        "$select": "id,subject,body,sentDateTime,receivedDateTime",
+    }
+    result = outlook._get(endpoint, params=params)
+    return result.get("value", []) if result else []
+
+
+def _body_to_plain(msg: Dict) -> str:
+    """Extract and flatten HTML body from a Graph message dict."""
+    raw = msg.get("body", {}).get("content", "") if isinstance(msg.get("body"), dict) else ""
+    plain = re.sub(r"<[^>]+>", " ", raw)
+    return re.sub(r"\s{2,}", " ", plain).strip()
+
+
+def collect_property_data(
+    outlook: OutlookClient,
+    raw_message: Dict,
+    email: Dict,
+    category: str,
+) -> Dict[str, Optional[str]]:
+    """
+    Gather property data from three sources in priority order:
+      A) The enquiry email — raw HTML body (richer than stripped plain text)
+      B) Sent Items search by address (Eddie's own prior emails about the property)
+      C) Full inbox search by address (listing info sheets, brochures, agent emails)
+    """
     details: Dict[str, Optional[str]] = {
         "address": None,
         "asking_rent": None,
+        "asking_price": None,
         "internal_area": None,
         "external_area": None,
         "building_name": None,
+        "outgoings": None,
+        "car_spaces": None,
+        "zoning": None,
     }
 
-    # Asking rent: $XX,XXX p.a. / per annum
-    rent_m = re.search(
-        r'\$([\d,]+(?:\.\d+)?)\s*(?:p\.?a\.?|per\s+annum)',
-        combined, re.IGNORECASE,
-    )
-    if rent_m:
-        details["asking_rent"] = f"${rent_m.group(1)} p.a. gross + GST"
+    subject = email.get("subject", "")
 
-    # Floor areas: first match → internal, second → external
-    area_matches = re.findall(
-        r'([\d,]+(?:\.\d+)?)\s*(?:sqm|m²|sq\.?\s*m)',
-        combined, re.IGNORECASE,
-    )
-    if area_matches:
-        details["internal_area"] = f"{area_matches[0]} sqm*"
-        if len(area_matches) > 1:
-            details["external_area"] = f"{area_matches[1]} sqm*"
+    # ── Address first — needed for subsequent searches ─────────────────────────
+    details["address"] = _extract_address(subject, email.get("body", ""))
 
-    # Building name: known names, "award-winning X development", or generic X Building/Tower etc.
-    building_pats = [
-        r'\b(Sirius[^,.\n]*)',
-        r'award[- ]winning\s+([A-Z][A-Za-z0-9\s]+?)(?:\s+development|\s+building|\s+complex|[,.\n])',
-        r'\bthe\s+([A-Z][A-Za-z0-9\s]+(?:Centre|Center|Tower|Building|Plaza|House|Court|Arcade|Mall))',
-    ]
-    for pat in building_pats:
-        m = re.search(pat, combined, re.IGNORECASE)
-        if m:
-            details["building_name"] = m.group(1).strip()
-            break
-
-    _STREET_TYPES = (
-        r'Street|St|Road|Rd|Avenue|Ave|Drive|Dr|Lane|Ln|Place|Pl|Way|'
-        r'Highway|Hwy|Crescent|Cres|Boulevard|Blvd|Parade|Pde|Court|Ct|'
-        r'Close|Circuit|Cct|Terrace|Tce'
+    # ── Source A: enquiry email, raw HTML ─────────────────────────────────────
+    raw_html = (
+        raw_message.get("body", {}).get("content", "")
+        if isinstance(raw_message.get("body"), dict)
+        else ""
     )
+    html_plain = re.sub(r"\s{2,}", " ", re.sub(r"<[^>]+>", " ", raw_html)).strip()
+    _merge_into(details, _parse_property_fields(f"{subject}\n{html_plain}", category))
+    logger.debug("  [A] After email body: %s", {k: v for k, v in details.items() if v})
 
-    # Realcommercial/CRE portal subject format:
-    # "Enquiry for Property ID: 12345, 6/895 Pacific Highway, Pymble, NSW, Contacted..."
-    portal_m = re.search(
-        r'Property ID:\s*\d+,\s*(.+?),\s*Contacted',
-        combined, re.IGNORECASE,
-    )
-    if portal_m:
-        details["address"] = portal_m.group(1).strip()
-    else:
-        # Generic: look for "for/at/about NUMBER ... STREET_TYPE" in body
-        addr_m = re.search(
-            rf'(?:for|at|about|regarding)\s+(\d+[^,\n]+?(?:{_STREET_TYPES})'
-            r'[^,\n]*(?:,\s*[A-Z][A-Za-z\s]+)?)',
-            combined, re.IGNORECASE,
+    # ── Source B: Sent Items search by street address ──────────────────────────
+    short_addr = _shorten_address(details.get("address"))
+    if short_addr:
+        sent_msgs = _search_folder_body(
+            outlook, "/me/mailFolders/sentitems/messages", short_addr, top=5
         )
-        if addr_m:
-            details["address"] = addr_m.group(1).strip()
-        else:
-            subj_clean = re.sub(r'^(re|fwd?|enquiry):\s*', '', subject, flags=re.IGNORECASE).strip()
-            if re.search(rf'\d+.*(?:{_STREET_TYPES})', subj_clean, re.IGNORECASE):
-                details["address"] = subj_clean[:120]
+        logger.info("  [B] Sent Items hits for %r: %d", short_addr, len(sent_msgs))
+        for msg in sent_msgs:
+            _merge_into(details, _parse_property_fields(
+                f"{msg.get('subject', '')}\n{_body_to_plain(msg)}", category
+            ))
+        logger.debug("  [B] After Sent Items: %s", {k: v for k, v in details.items() if v})
+
+    # ── Source C: full inbox search by street address ─────────────────────────
+    if short_addr:
+        inbox_msgs = _search_folder_body(outlook, "/me/messages", short_addr, top=5)
+        logger.info("  [C] Inbox hits for %r: %d", short_addr, len(inbox_msgs))
+        for msg in inbox_msgs:
+            if msg.get("id") == email.get("id"):
+                continue
+            _merge_into(details, _parse_property_fields(
+                f"{msg.get('subject', '')}\n{_body_to_plain(msg)}", category
+            ))
+        logger.debug("  [C] After inbox search: %s", {k: v for k, v in details.items() if v})
+
+    # ── Fallback placeholders for still-missing key fields ─────────────────────
+    if not details.get("address"):
+        details["address"] = "[PLEASE ADD - PROPERTY ADDRESS]"
+    if category == "lease_enquiry" and not details.get("asking_rent"):
+        details["asking_rent"] = "[PLEASE ADD - RENT/PRICE]"
+    if category == "sale_enquiry" and not details.get("asking_price"):
+        details["asking_price"] = "[PLEASE ADD - SALE PRICE]"
+    if not details.get("internal_area"):
+        details["internal_area"] = "[PLEASE ADD - SIZE]"
 
     return details
 
@@ -343,11 +524,8 @@ def claude_draft_reply(
 
     if is_enquiry:
         ld = listing_details or {}
-        address = ld.get("address") or "[PROPERTY ADDRESS]"
-        asking_rent = ld.get("asking_rent") or "[ASKING RENT]"
-        internal_area = ld.get("internal_area") or "[INTERNAL AREA]"
-        external_area = ld.get("external_area") or "[EXTERNAL AREA]"
-        building_name = ld.get("building_name") or "[BUILDING NAME]"
+        address = ld.get("address") or "[PLEASE ADD - PROPERTY ADDRESS]"
+        building_name = ld.get("building_name")
 
         body_lower = email.get("body", "").lower()
         prop_type = (
@@ -356,6 +534,45 @@ def claude_draft_reply(
             else "industrial" if "industrial" in body_lower
             else "commercial"
         )
+        action_type = "for lease" if category == "lease_enquiry" else "for sale"
+
+        # Build dynamic highlights block (lease vs sale)
+        highlights: List[str] = []
+        if category == "lease_enquiry":
+            highlights.append(
+                f"• Asking Rent: {ld.get('asking_rent') or '[PLEASE ADD - RENT/PRICE]'}"
+            )
+            highlights.append(
+                f"• Internal Floor Area: {ld.get('internal_area') or '[PLEASE ADD - SIZE]'}"
+            )
+            if ld.get("external_area"):
+                highlights.append(f"• External Area: {ld['external_area']}")
+            if ld.get("outgoings"):
+                highlights.append(f"• Outgoings: {ld['outgoings']}")
+            if ld.get("car_spaces"):
+                highlights.append(f"• Car Spaces: {ld['car_spaces']}")
+        else:  # sale_enquiry
+            highlights.append(
+                f"• Asking Price: {ld.get('asking_price') or '[PLEASE ADD - SALE PRICE]'}"
+            )
+            highlights.append(
+                f"• Internal Floor Area: {ld.get('internal_area') or '[PLEASE ADD - SIZE]'}"
+            )
+            if ld.get("external_area"):
+                highlights.append(f"• External Area: {ld['external_area']}")
+            if ld.get("zoning"):
+                highlights.append(f"• Zoning: {ld['zoning']}")
+            if ld.get("car_spaces"):
+                highlights.append(f"• Car Spaces: {ld['car_spaces']}")
+        if building_name:
+            highlights.append(f"• Part of the award-winning {building_name} development")
+        highlights_str = "\n".join(highlights)
+
+        # "Nestled within..." paragraph only when building name is known
+        nestled_para = (
+            f"Nestled within the {building_name}, this is a rare chance to secure a "
+            "premium position in one of Sydney's most iconic precincts.\n\n"
+        ) if building_name else ""
 
         style_block = ""
         if style_examples:
@@ -380,14 +597,10 @@ def claude_draft_reply(
             "Hi [sender's first name],\n\n"
             "Hope all is well.\n\n"
             f"IB Property is pleased to bring to market {address}, an exceptional "
-            f"{prop_type} opportunity available for lease.\n\n"
-            f"Nestled within the {building_name}, this is a rare chance to secure a "
-            "premium position in one of Sydney's most iconic precincts.\n\n"
+            f"{prop_type} opportunity available {action_type}.\n\n"
+            f"{nestled_para}"
             "**Property Highlights**\n"
-            f"• Asking Rent: {asking_rent}\n"
-            f"• Internal Floor Area: {internal_area}\n"
-            f"• External Area: {external_area}\n"
-            f"• Part of the award-winning {building_name} development\n\n"
+            f"{highlights_str}\n\n"
             "For further information or to arrange an inspection, please don't hesitate "
             "to reach out to our exclusive listing agents.\n\n"
             "We look forward to hearing from you.\n\n"
@@ -396,7 +609,7 @@ def claude_draft_reply(
             "edward@ibproperty.com.au\n\n"
             "--- RENDERING INSTRUCTIONS ---\n"
             "- Replace [sender's first name] with the actual first name from the From field\n"
-            "- Any value shown as [PLACEHOLDER] must remain as-is so Eddie can fill it in\n"
+            "- Any value shown as [PLEASE ADD - X] must remain exactly as-is in the output\n"
             "- Return ONLY the HTML body using <p>, <strong>, and <br> tags\n"
             "- Render '**Property Highlights**' as <strong>Property Highlights</strong>\n"
             "- Each bullet point on its own line with a • character\n"
@@ -549,12 +762,12 @@ def main(max_emails: Optional[int] = None) -> None:
             if related_attachments:
                 logger.info("  Related attachments: %s", related_attachments)
 
-        # 3. Draft reply via Claude
+        # 3. Collect property data and draft reply via Claude
         is_enq = category in ("lease_enquiry", "sale_enquiry")
         examples = sent_enquiry_examples if is_enq else None
-        listing_details = extract_listing_details(email) if is_enq else None
+        listing_details = collect_property_data(outlook, raw, email, category) if is_enq else None
         if listing_details:
-            logger.info("  Listing details: %s", listing_details)
+            logger.info("  Property data: %s", {k: v for k, v in listing_details.items() if v})
         reply_subject, html_body = claude_draft_reply(
             ai, email, category, related_attachments,
             style_examples=examples, listing_details=listing_details,
@@ -599,9 +812,10 @@ def main(max_emails: Optional[int] = None) -> None:
     )
 
 
-def test_draft(max_scan: int = 10) -> None:
-    """Fetch the first enquiry email from inbox and print the draft — nothing is saved."""
-    logger.info("=== TEST MODE — printing draft, not saving ===")
+def test_draft(max_scan: int = 20, subject_filter: str = "") -> None:
+    """Fetch a matching enquiry email from inbox and print the draft — nothing is saved."""
+    filter_desc = f" matching {subject_filter!r}" if subject_filter else ""
+    logger.info("=== TEST MODE — printing draft, not saving%s ===", filter_desc)
 
     missing = [k for k in ("ANTHROPIC_API_KEY", "AZURE_CLIENT_ID", "AZURE_TENANT_ID") if not os.getenv(k)]
     if missing:
@@ -620,12 +834,17 @@ def test_draft(max_scan: int = 10) -> None:
     sent_examples = fetch_sent_enquiry_examples(outlook)
     logger.info("Found %d style example(s)", len(sent_examples))
 
-    logger.info("Fetching recent inbox emails (last 7 days)...")
-    raw_messages = outlook.get_recent_emails(since_days=7, extra_folders=["Front of Mind"])
+    logger.info("Fetching recent inbox emails (last 30 days)...")
+    raw_messages = outlook.get_recent_emails(since_days=30, extra_folders=["Front of Mind"])
+    logger.info("Total messages fetched: %d", len(raw_messages))
 
     for raw in raw_messages[:max_scan]:
         email = OutlookClient.extract_email_data(raw)
         if is_self_sent(email) or is_automated(email):
+            continue
+
+        # Subject filter (case-insensitive substring match)
+        if subject_filter and subject_filter.lower() not in email.get("subject", "").lower():
             continue
 
         category = claude_classify(ai, email)
@@ -634,8 +853,11 @@ def test_draft(max_scan: int = 10) -> None:
             continue
 
         logger.info("Found enquiry: %s | category=%s", email.get("subject"), category)
-        listing_details = extract_listing_details(email)
-        logger.info("Extracted listing details: %s", listing_details)
+        listing_details = collect_property_data(outlook, raw, email, category)
+        logger.info(
+            "Property data collected: %s",
+            {k: v for k, v in listing_details.items() if v},
+        )
 
         _, html_body = claude_draft_reply(
             ai, email, category, [],
@@ -653,7 +875,10 @@ def test_draft(max_scan: int = 10) -> None:
         print("=" * 70)
         return
 
-    logger.warning("No enquiry email found in the first %d messages scanned.", max_scan)
+    logger.warning(
+        "No enquiry email found in the first %d messages scanned%s.",
+        max_scan, filter_desc,
+    )
 
 
 if __name__ == "__main__":
@@ -665,9 +890,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Print a draft for the first enquiry found, do not save to Drafts",
     )
+    parser.add_argument(
+        "--subject",
+        default="",
+        help="Filter: only test against emails whose subject contains this string",
+    )
     args = parser.parse_args()
 
     if args.test:
-        test_draft()
+        test_draft(subject_filter=args.subject)
     else:
         main()
