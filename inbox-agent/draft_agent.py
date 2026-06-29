@@ -9,6 +9,7 @@ Usage:
 """
 
 import html as _html
+import json
 import os
 import sys
 import base64
@@ -220,6 +221,42 @@ def extract_property_hint(subject: str) -> Optional[str]:
     """Strip Re:/Fwd: prefixes and return the core subject as a search hint."""
     cleaned = re.sub(r"^(re|fwd?):\s*", "", subject.strip(), flags=re.IGNORECASE).strip()
     return cleaned[:60] if len(cleaned) > 5 else None
+
+
+# ─── Listings database ───────────────────────────────────────────────────────
+
+_LISTINGS_DB_PATH = os.path.join(os.path.dirname(__file__), "listings_db.json")
+
+
+def load_listings_db() -> Dict:
+    """Load listings_db.json. Returns empty DB if file doesn't exist yet."""
+    try:
+        with open(_LISTINGS_DB_PATH) as fh:
+            return json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"listings": []}
+
+
+def find_listing_in_db(db: Dict, address: str) -> Optional[Dict]:
+    """Find the best matching listing by street number + first street-name word."""
+    if not address:
+        return None
+    addr_lower = address.lower()
+
+    num_m = re.search(r'\b(\d+\w?)\b', addr_lower)
+    street_m = re.search(r'\d+\w?\s+(\w+)', addr_lower)
+    if not num_m or not street_m:
+        return None
+
+    street_num = num_m.group(1)
+    street_word = street_m.group(1)
+
+    for listing in db.get("listings", []):
+        db_addr = listing.get("address", "").lower()
+        if street_num in db_addr and street_word in db_addr:
+            return listing
+
+    return None
 
 
 # ─── Listing detail extraction ────────────────────────────────────────────────
@@ -499,12 +536,14 @@ def collect_property_data(
     raw_message: Dict,
     email: Dict,
     category: str,
+    listings_db: Optional[Dict] = None,
 ) -> Dict[str, Optional[str]]:
     """
-    Gather property data from three sources in priority order:
-      A) The enquiry email — raw HTML body (richer than stripped plain text)
-      B) Sent Items search by address (Eddie's own prior emails about the property)
-      C) Full inbox search by address (listing info sheets, brochures, agent emails)
+    Gather property data in priority order:
+      DB) listings_db.json — pre-scraped from Eddie's own vendor update emails (primary)
+      A)  The enquiry email — raw HTML body
+      B)  Sent Items search by address (only when no DB match)
+      C)  Full inbox search by address (only when no DB match)
     """
     details: Dict[str, Optional[str]] = {
         "address": None,
@@ -559,30 +598,65 @@ def collect_property_data(
     _merge_into(details, _parse_property_fields(f"{subject}\n{html_plain}", category))
     logger.debug("  [A] After email body: %s", {k: v for k, v in details.items() if v})
 
-    # ── Source B: Sent Items search by street address ──────────────────────────
-    short_addr = _shorten_address(details.get("address"))
-    if short_addr:
-        sent_msgs = _search_folder_body(
-            outlook, "/me/mailFolders/sentitems/messages", short_addr, top=5
-        )
-        logger.info("  [B] Sent Items hits for %r: %d", short_addr, len(sent_msgs))
-        for msg in sent_msgs:
-            _merge_into(details, _parse_property_fields(
-                f"{msg.get('subject', '')}\n{_body_to_plain(msg)}", category
-            ))
-        logger.debug("  [B] After Sent Items: %s", {k: v for k, v in details.items() if v})
+    # ── Source DB: listings_db.json (pre-scraped from vendor update emails) ────
+    db_matched = False
+    if listings_db and details.get("address"):
+        db_match = find_listing_in_db(listings_db, details["address"])
+        if db_match:
+            logger.info("  [DB] Match in listings_db: %s", db_match.get("address"))
+            # DB data is authoritative — overwrite anything Source A may have found
+            if db_match.get("asking_rent"):
+                details["asking_rent"] = db_match["asking_rent"]
+            if db_match.get("price"):
+                details["asking_price"] = db_match["price"]
+            if db_match.get("net_rent"):
+                details["net_rent"] = db_match["net_rent"]
+            if db_match.get("fully_leased_rent"):
+                details["fully_leased_rent"] = db_match["fully_leased_rent"]
+            if db_match.get("floor_area"):
+                details["internal_area"] = db_match["floor_area"]
+            if db_match.get("land_area"):
+                details["land_area"] = db_match["land_area"]
+            if db_match.get("building"):
+                details["building_name"] = db_match["building"]
+            if db_match.get("im_url"):
+                details["im_url"] = db_match["im_url"]
+            if db_match.get("lease_terms"):
+                details["lease_summary"] = db_match["lease_terms"]
+            if db_match.get("notes"):
+                details["vacancy_note"] = db_match["notes"]
+            if db_match.get("parking"):
+                car_m = re.search(r'\d+', db_match["parking"])
+                if car_m:
+                    details["car_spaces"] = car_m.group()
+            db_matched = True
+            logger.debug("  [DB] After DB merge: %s", {k: v for k, v in details.items() if v})
 
-    # ── Source C: full inbox search by street address ─────────────────────────
-    if short_addr:
-        inbox_msgs = _search_folder_body(outlook, "/me/messages", short_addr, top=5)
-        logger.info("  [C] Inbox hits for %r: %d", short_addr, len(inbox_msgs))
-        for msg in inbox_msgs:
-            if msg.get("id") == email.get("id"):
-                continue
-            _merge_into(details, _parse_property_fields(
-                f"{msg.get('subject', '')}\n{_body_to_plain(msg)}", category
-            ))
-        logger.debug("  [C] After inbox search: %s", {k: v for k, v in details.items() if v})
+    if not db_matched:
+        # ── Source B: Sent Items search by street address ──────────────────────
+        short_addr = _shorten_address(details.get("address"))
+        if short_addr:
+            sent_msgs = _search_folder_body(
+                outlook, "/me/mailFolders/sentitems/messages", short_addr, top=5
+            )
+            logger.info("  [B] Sent Items hits for %r: %d", short_addr, len(sent_msgs))
+            for msg in sent_msgs:
+                _merge_into(details, _parse_property_fields(
+                    f"{msg.get('subject', '')}\n{_body_to_plain(msg)}", category
+                ))
+            logger.debug("  [B] After Sent Items: %s", {k: v for k, v in details.items() if v})
+
+        # ── Source C: full inbox search by street address ──────────────────────
+        if short_addr:
+            inbox_msgs = _search_folder_body(outlook, "/me/messages", short_addr, top=5)
+            logger.info("  [C] Inbox hits for %r: %d", short_addr, len(inbox_msgs))
+            for msg in inbox_msgs:
+                if msg.get("id") == email.get("id"):
+                    continue
+                _merge_into(details, _parse_property_fields(
+                    f"{msg.get('subject', '')}\n{_body_to_plain(msg)}", category
+                ))
+            logger.debug("  [C] After inbox search: %s", {k: v for k, v in details.items() if v})
 
     # ── Fallback placeholders for still-missing key fields ─────────────────────
     if not details.get("address"):
@@ -899,14 +973,22 @@ def main(max_emails: Optional[int] = None) -> None:
 
     ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+    # Load property listings database
+    listings_db = load_listings_db()
+    n_listings = len(listings_db.get("listings", []))
+    if n_listings:
+        logger.info("Loaded listings_db.json: %d listing(s)", n_listings)
+    else:
+        logger.info("listings_db.json not found or empty — run refresh_listings_db.py to build it")
+
     # Fetch style examples from Sent Items (used for enquiry drafts)
     logger.info("Fetching sent enquiry reply examples for style matching...")
     sent_enquiry_examples = fetch_sent_enquiry_examples(outlook)
     logger.info("Found %d past enquiry reply example(s)", len(sent_enquiry_examples))
 
-    # Fetch last 48 hours from Inbox + "Front of Mind"
-    logger.info("Fetching Outlook inbox + 'Front of Mind' (last 48 hours)...")
-    raw_messages = outlook.get_recent_emails(since_days=2, extra_folders=["Front of Mind"])
+    # Fetch last 48 hours from Inbox + "Front Of Mind"
+    logger.info("Fetching Outlook inbox + 'Front Of Mind' (last 48 hours)...")
+    raw_messages = outlook.get_recent_emails(since_days=2, extra_folders=["Front Of Mind"])
     logger.info("Retrieved %d messages", len(raw_messages))
 
     drafted = 0
@@ -961,7 +1043,7 @@ def main(max_emails: Optional[int] = None) -> None:
         # 3. Collect property data and draft reply via Claude
         is_enq = category in ("lease_enquiry", "sale_enquiry")
         examples = sent_enquiry_examples if is_enq else None
-        listing_details = collect_property_data(outlook, raw, email, category) if is_enq else None
+        listing_details = collect_property_data(outlook, raw, email, category, listings_db=listings_db) if is_enq else None
         if listing_details:
             logger.info("  Property data: %s", {k: v for k, v in listing_details.items() if v})
         reply_subject, html_body = claude_draft_reply(
@@ -1026,12 +1108,20 @@ def test_draft(max_scan: int = 20, subject_filter: str = "") -> None:
     )
     ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+    listings_db = load_listings_db()
+    n_listings = len(listings_db.get("listings", []))
+    logger.info(
+        "Loaded listings_db.json: %d listing(s)" if n_listings else
+        "listings_db.json empty — run refresh_listings_db.py",
+        n_listings,
+    )
+
     logger.info("Fetching style examples from Sent Items...")
     sent_examples = fetch_sent_enquiry_examples(outlook)
     logger.info("Found %d style example(s)", len(sent_examples))
 
     logger.info("Fetching recent inbox emails (last 30 days)...")
-    raw_messages = outlook.get_recent_emails(since_days=30, extra_folders=["Front of Mind"])
+    raw_messages = outlook.get_recent_emails(since_days=30, extra_folders=["Front Of Mind"])
     logger.info("Total messages fetched: %d", len(raw_messages))
 
     scan_limit = len(raw_messages) if subject_filter else max_scan
@@ -1050,7 +1140,7 @@ def test_draft(max_scan: int = 20, subject_filter: str = "") -> None:
             continue
 
         logger.info("Found enquiry: %s | category=%s", email.get("subject"), category)
-        listing_details = collect_property_data(outlook, raw, email, category)
+        listing_details = collect_property_data(outlook, raw, email, category, listings_db=listings_db)
         logger.info(
             "Property data collected: %s",
             {k: v for k, v in listing_details.items() if v},
