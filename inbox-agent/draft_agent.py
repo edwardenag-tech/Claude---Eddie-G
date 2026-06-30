@@ -151,6 +151,59 @@ def fetch_sent_enquiry_examples(outlook: OutlookClient) -> List[str]:
     return examples
 
 
+_ENQUIRY_REPLY_MARKERS = [
+    "pleased to present",
+    "pleased to bring to market",
+    "ib property is pleased",
+    "property highlights",
+    "floor area",
+    "asking rent",
+    "price guide",
+    "information memorandum",
+    "private treaty",
+]
+
+
+def fetch_sent_reply_for_address(
+    outlook: OutlookClient, address: Optional[str]
+) -> Optional[str]:
+    """Search Sent Items for the most recent enquiry reply Eddie sent about this property.
+
+    Returns the plain-text body of the best match, or None if not found.
+    """
+    if not address:
+        return None
+
+    short = _shorten_address(address)
+    if not short:
+        return None
+
+    # Search by street name only — more robust than full address
+    street_m = re.search(r'\d+\w?\s+(\w+)', short)
+    search_term = street_m.group(1) if street_m else short
+
+    logger.info("  [Sent] Searching for past reply to: %r", search_term)
+    msgs = _search_folder_body(
+        outlook, "/me/mailFolders/sentitems/messages", search_term, top=10
+    )
+    logger.info("  [Sent] Found %d sent messages", len(msgs))
+
+    for msg in msgs:
+        plain = _body_to_plain(msg)
+        raw_html = msg.get("body", {}).get("content", "") if isinstance(msg.get("body"), dict) else ""
+        combined = (plain + " " + raw_html).lower()
+        marker_hits = sum(1 for m in _ENQUIRY_REPLY_MARKERS if m in combined)
+        if marker_hits >= 2:
+            logger.info(
+                "  [Sent] Matched reply: %s (markers=%d)",
+                msg.get("subject", ""), marker_hits,
+            )
+            return plain
+
+    logger.info("  [Sent] No matching enquiry reply found for %r", search_term)
+    return None
+
+
 def outlook_create_draft(
     outlook: OutlookClient,
     email_id: str,
@@ -684,32 +737,56 @@ def collect_property_data(
 
 # ─── Claude helpers ───────────────────────────────────────────────────────────
 
-def claude_classify(ai: anthropic.Anthropic, email: Dict) -> str:
-    """Return one of the five CRE category strings."""
+def claude_classify(ai: anthropic.Anthropic, email: Dict) -> Tuple[str, bool]:
+    """Return (category, is_lion). is_lion=True means a reply draft should be created."""
     prompt = (
         "You are an assistant for IB Property Sydney, a commercial real estate agency.\n\n"
-        "Classify the following email into EXACTLY ONE category:\n"
+        "Classify the following email and decide if it is urgent enough to require a reply draft.\n\n"
+        "Categories:\n"
         "  lease_enquiry   — enquiry about leasing a property\n"
         "  sale_enquiry    — enquiry about buying or selling a property\n"
         "  vendor_update   — update from a vendor, supplier, or tradesperson\n"
         "  landlord_query  — query or request from a landlord or property owner\n"
         "  general         — anything else\n\n"
+        "An email IS a lion (is_lion: true) if:\n"
+        "- It is a direct enquiry from a potential buyer or tenant\n"
+        "- It has a direct question that needs answering from a client, landlord, or vendor\n"
+        "- It involves an offer, contract, or negotiation\n"
+        "- It is from a known contact asking something specific\n"
+        "- Not replying would cause a missed deal, upset a client, or create a problem\n\n"
+        "An email is NOT a lion (is_lion: false) if:\n"
+        "- It is a listing performance report or campaign stats from a portal (realcommercial, commercialrealestate)\n"
+        "- It is a FYI or announcement (LEASED / SOLD notices that need no reply)\n"
+        "- It is a weekly or monthly stats digest or purely informational portal notification\n"
+        "- It is from Grammarly, a newsletter, or a marketing list\n"
+        "- It is an internal IB Property broadcast that requires no reply\n"
+        "- It is just an update with no question or action required\n\n"
+        "Ask yourself: Is this email urgent enough that not replying would cause a problem? "
+        "If it is just an informational update, report, or announcement, answer false.\n\n"
         f"From: {email.get('from_name', '')} <{email.get('from', '')}>\n"
         f"Subject: {email.get('subject', '')}\n"
         f"Body: {email.get('body', '')[:600]}\n\n"
-        "Reply with only the category name, nothing else."
+        'Reply with ONLY valid JSON in this exact format: {"category": "<category>", "is_lion": <true|false>}'
     )
     try:
         response = ai.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=20,
+            max_tokens=60,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = response.content[0].text.strip().lower()
-        return raw if raw in CATEGORIES else "general"
+        raw = response.content[0].text.strip()
+        # Strip markdown fences if present
+        raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.IGNORECASE)
+        raw = re.sub(r'\s*```$', '', raw).strip()
+        data = json.loads(raw)
+        category = data.get("category", "general").lower().strip()
+        is_lion = bool(data.get("is_lion", False))
+        if category not in CATEGORIES:
+            category = "general"
+        return category, is_lion
     except Exception as exc:
         logger.error("Claude classify failed: %s", exc)
-        return "general"
+        return "general", False
 
 
 def claude_draft_reply(
@@ -719,12 +796,61 @@ def claude_draft_reply(
     related_attachments: List[str],
     style_examples: Optional[List[str]] = None,
     listing_details: Optional[Dict] = None,
+    sent_template: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Return (reply_subject, html_body) for a professional CRE reply."""
     attachments_note = ""
     if related_attachments:
         names = ", ".join(related_attachments[:10])
         attachments_note = f"\n\nRelated documents found in the thread: {names}"
+
+    # ── Sent Items template path — replicate Eddie's previous reply almost verbatim ──
+    if sent_template and category in ("lease_enquiry", "sale_enquiry"):
+        from_name = email.get("from_name", "").strip()
+        enquirer_first = from_name.split()[0] if from_name else "there"
+        prompt = (
+            "You are drafting a reply on behalf of Edward Ghattas, "
+            "commercial real estate agent at IB Property Sydney.\n\n"
+            "--- Original enquiry ---\n"
+            f"From: {email.get('from_name', 'the sender')} <{email.get('from', '')}>\n"
+            f"Subject: {email.get('subject', '')}\n"
+            f"Body:\n{email.get('body', '')[:800]}"
+            f"{attachments_note}\n\n"
+            "--- Previous reply Edward sent about this property ---\n"
+            f"{sent_template[:2500]}\n\n"
+            "--- Instructions ---\n"
+            "This is the exact email Edward sent previously about this property. "
+            "Replicate it almost word for word. Only change:\n"
+            f"(a) the recipient's first name to: {enquirer_first}\n"
+            "(b) any direct reference to the previous enquirer's name elsewhere in the body\n"
+            "Keep everything else identical — the property details, the tone, "
+            "the structure, the sign-off.\n\n"
+            "Return ONLY the HTML body content using <p>, <strong>, and <br> tags. "
+            "Do not include a subject line inside the body."
+        )
+        try:
+            response = ai.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1200,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            html_body = response.content[0].text.strip()
+            html_body = re.sub(r'^```(?:html)?\s*', '', html_body, flags=re.IGNORECASE)
+            html_body = re.sub(r'\s*```$', '', html_body).strip()
+        except Exception as exc:
+            logger.error("Claude sent-template draft failed: %s", exc)
+            html_body = (
+                "<p>Thank you for your email. I will review this and get back to you shortly.</p>"
+                "<p>Kind regards,<br>Edward Ghattas<br>IB Property Sydney<br>"
+                "edward@ibproperty.com.au</p>"
+            )
+        original_subject = email.get("subject", "")
+        reply_subject = (
+            original_subject
+            if original_subject.lower().startswith("re:")
+            else f"Re: {original_subject}"
+        )
+        return reply_subject, html_body
 
     if category == "lease_enquiry":
         ld = listing_details or {}
@@ -1023,9 +1149,14 @@ def main(max_emails: Optional[int] = None) -> None:
         # ── Process ──────────────────────────────────────────────────────────
         logger.info("Processing: %s | from=%s", subject, from_addr)
 
-        # 1. Classify
-        category = claude_classify(ai, email)
-        logger.info("  Category → %s", category)
+        # 1. Classify + lion check
+        category, is_lion = claude_classify(ai, email)
+        logger.info("  Category → %s | is_lion=%s", category, is_lion)
+
+        if not is_lion:
+            logger.info("SKIPPED (not urgent): %s", subject)
+            skipped += 1
+            continue
 
         # 2. Find related emails by property hint; collect attachment names
         related_attachments: List[str] = []
@@ -1040,15 +1171,30 @@ def main(max_emails: Optional[int] = None) -> None:
             if related_attachments:
                 logger.info("  Related attachments: %s", related_attachments)
 
-        # 3. Collect property data and draft reply via Claude
+        # 3. Collect property data / find sent template, then draft reply via Claude
         is_enq = category in ("lease_enquiry", "sale_enquiry")
-        examples = sent_enquiry_examples if is_enq else None
-        listing_details = collect_property_data(outlook, raw, email, category, listings_db=listings_db) if is_enq else None
-        if listing_details:
-            logger.info("  Property data: %s", {k: v for k, v in listing_details.items() if v})
+        sent_template: Optional[str] = None
+        listing_details = None
+
+        if is_enq:
+            # Try to find a past sent reply for the same property first
+            address = _extract_address(email.get("subject", ""), email.get("body", "")[:500])
+            sent_template = fetch_sent_reply_for_address(outlook, address)
+            if sent_template:
+                logger.info("  Using Sent Items template for reply")
+            else:
+                # Fall back to listings_db / multi-source data collection
+                listing_details = collect_property_data(
+                    outlook, raw, email, category, listings_db=listings_db
+                )
+                logger.info("  Property data: %s", {k: v for k, v in listing_details.items() if v})
+
+        examples = sent_enquiry_examples if is_enq and not sent_template else None
         reply_subject, html_body = claude_draft_reply(
             ai, email, category, related_attachments,
-            style_examples=examples, listing_details=listing_details,
+            style_examples=examples,
+            listing_details=listing_details,
+            sent_template=sent_template,
         )
 
         # 4. Save to Outlook Drafts (threaded reply via createReply + PATCH)
@@ -1134,22 +1280,35 @@ def test_draft(max_scan: int = 20, subject_filter: str = "") -> None:
         if subject_filter and subject_filter.lower() not in email.get("subject", "").lower():
             continue
 
-        category = claude_classify(ai, email)
+        category, is_lion = claude_classify(ai, email)
         if category not in ("lease_enquiry", "sale_enquiry"):
             logger.info("  Skipping (category=%s): %s", category, email.get("subject"))
             continue
+        if not is_lion:
+            logger.info("  Skipping (not urgent, is_lion=False): %s", email.get("subject"))
+            continue
 
         logger.info("Found enquiry: %s | category=%s", email.get("subject"), category)
-        listing_details = collect_property_data(outlook, raw, email, category, listings_db=listings_db)
-        logger.info(
-            "Property data collected: %s",
-            {k: v for k, v in listing_details.items() if v},
-        )
 
+        # Try Sent Items template first
+        address = _extract_address(email.get("subject", ""), email.get("body", "")[:500])
+        sent_template = fetch_sent_reply_for_address(outlook, address)
+        listing_details = None
+        if sent_template:
+            logger.info("Using Sent Items template for reply")
+        else:
+            listing_details = collect_property_data(outlook, raw, email, category, listings_db=listings_db)
+            logger.info(
+                "Property data collected: %s",
+                {k: v for k, v in listing_details.items() if v},
+            )
+
+        examples = sent_examples if not sent_template else None
         _, html_body = claude_draft_reply(
             ai, email, category, [],
-            style_examples=sent_examples,
+            style_examples=examples,
             listing_details=listing_details,
+            sent_template=sent_template,
         )
         plain = re.sub(r"<[^>]+>", " ", html_body)
         plain = re.sub(r"\s{2,}", " ", plain).strip()
