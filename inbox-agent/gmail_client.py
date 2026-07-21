@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
+    # Added so the same token cache also covers DocsClient (docs_client.py),
+    # used to read live campaign data from the shared Google Doc.
+    "https://www.googleapis.com/auth/documents.readonly",
 ]
 
 

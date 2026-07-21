@@ -1,8 +1,13 @@
 """Vendor/landlord weekly campaign update agent for IB Property.
 
-Drafts Monday-morning campaign update emails for each active listing in
-listings_db.json, saves them to both Outlook Drafts and Gmail Drafts.
-Never auto-sends.
+Drafts Monday-morning campaign update emails for each active campaign listed
+in the ACTIVE CAMPAIGNS section of the shared "Campaign Enquiry Reply
+Templates" Google Doc (see docs_client.py / campaign_doc_parser.py), saves
+them to both Outlook Drafts and Gmail Drafts. Never auto-sends.
+
+The doc is fetched live on every run -- Eddie keeps its Status field in sync
+with the Dropbox Campaign Checklist, so edits there take effect on the very
+next run without redeploying anything.
 
 Usage:
     python vendor_update_agent.py
@@ -10,7 +15,6 @@ Usage:
 
 import base64
 import html as _html
-import json
 import logging
 import os
 import re
@@ -25,6 +29,8 @@ from dotenv import load_dotenv
 
 from gmail_client import GmailClient
 from outlook_client import OutlookClient
+from docs_client import DocsClient
+from campaign_doc_parser import parse_active_campaigns
 
 # ─── Bootstrap ───────────────────────────────────────────────────────────────
 
@@ -43,40 +49,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_LISTINGS_DB_PATH = os.path.join(os.path.dirname(__file__), "listings_db.json")
-
-# Listings whose notes contain these markers are skipped (not active Eddie campaigns)
-_SKIP_NOTES = re.compile(
-    r"property has been sold|competing listing|marketed by sutton anderson",
-    re.IGNORECASE,
+# CAMPAIGN_DOC_ID: the "Campaign Enquiry Reply Templates" Google Doc.
+# Eddie maintains the ACTIVE CAMPAIGNS section with current status pulled from
+# the Dropbox Campaign Checklist. This agent always fetches the LIVE doc
+# content at run time -- never a cached/stale copy -- so Eddie's edits take
+# effect on the very next run.
+_CAMPAIGN_DOC_ID = os.getenv(
+    "CAMPAIGN_DOC_ID", "12gKTGiqwqgEc5iBnypfKFP79bEKThc1ltBOnIvC8Mrk"
 )
 
-# ─── Listing helpers ──────────────────────────────────────────────────────────
+# Campaigns whose status contains these markers are skipped (no longer active)
+_SKIP_STATUS = re.compile(r"\bsold\b|\bleased\b(?!.*under offer)", re.IGNORECASE)
+
+# ─── Campaign helpers ─────────────────────────────────────────────────────────
 
 
-def load_active_listings() -> List[Dict]:
-    """Load listings_db.json and return unique, active listings only."""
-    try:
-        with open(_LISTINGS_DB_PATH) as fh:
-            data = json.load(fh)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
-        logger.error("Could not load listings_db.json: %s", exc)
+def load_active_campaigns(docs: DocsClient) -> List[Dict]:
+    """Fetch the live campaign doc and return unique, active campaign dicts.
+
+    Replaces the old listings_db.json / refresh_listings_db.py pipeline, which
+    was regenerating "updates" from Eddie's own past update emails -- a closed
+    loop that never reflected real current status. This reads Eddie's manually
+    maintained ACTIVE CAMPAIGNS section instead, which he keeps in sync with
+    the Dropbox Campaign Checklist.
+    """
+    doc_text = docs.fetch_doc_text(_CAMPAIGN_DOC_ID)
+    if doc_text is None:
+        logger.error("Could not fetch campaign doc (id=%s)", _CAMPAIGN_DOC_ID)
         return []
+
+    campaigns = parse_active_campaigns(doc_text)
 
     seen_addresses: set = set()
     active = []
-    for listing in data.get("listings", []):
-        notes = listing.get("notes", "")
-        if _SKIP_NOTES.search(notes):
-            logger.info("Skipping listing (sold/competing): %s", listing.get("address"))
+    for campaign in campaigns:
+        status = campaign.get("status", "")
+        if _SKIP_STATUS.search(status):
+            logger.info("Skipping campaign (sold/leased per doc): %s", campaign.get("address"))
             continue
-        addr = listing.get("address", "").strip().lower()
+        addr = campaign.get("address", "").strip().lower()
         if not addr or addr in seen_addresses:
             continue
+        if not status:
+            logger.warning(
+                "Campaign %s has no Status filled in -- drafting anyway, but "
+                "the update will lack a confirmed current-status line. Ask "
+                "Eddie to fill in 'Status (from Campaign Checklist)' in the doc.",
+                campaign.get("address"),
+            )
         seen_addresses.add(addr)
-        active.append(listing)
+        active.append(campaign)
 
-    logger.info("Loaded %d active unique listings", len(active))
+    logger.info("Loaded %d active unique campaign(s) from doc", len(active))
     return active
 
 
@@ -303,7 +327,7 @@ Thank you."""
 
 def claude_draft_vendor_update(
     ai: anthropic.Anthropic,
-    listing: Dict,
+    campaign: Dict,
     landlord_first_name: Optional[str],
     inbox_snippets: List[str],
     sent_snippets: List[str],
@@ -311,9 +335,11 @@ def claude_draft_vendor_update(
 ) -> Tuple[str, str]:
     """Return (subject, html_body) for the vendor update email."""
 
-    address = listing.get("address", "[ADDRESS]")
-    listing_type = listing.get("type", "sale").lower()
-    notes = listing.get("notes", "")
+    address = campaign.get("address", "[ADDRESS]")
+    status = campaign.get("status", "") or "(not filled in on the doc yet -- ask Eddie)"
+    positioning = campaign.get("positioning", "")
+    key_facts = campaign.get("key_facts", [])
+    price_guide = campaign.get("price_guide", "")
 
     first_name = landlord_first_name or "[LANDLORD FIRST NAME - PLEASE UPDATE]"
 
@@ -340,12 +366,20 @@ def claude_draft_vendor_update(
             + "\n--- END STYLE REFERENCE ---"
         )
 
+    key_facts_block = (
+        "\n".join(f"  - {f}" for f in key_facts) if key_facts else "  (none listed on the doc)"
+    )
+
     prompt = (
         "You are drafting a vendor/landlord campaign update email on behalf of Edward Ghattas, "
         "commercial real estate agent at IB Property Sydney.\n\n"
         f"Property: {address}\n"
-        f"Type: {listing_type}\n"
-        f"Campaign notes (authoritative background):\n{notes}\n\n"
+        f"CURRENT STATUS (from Eddie's Dropbox Campaign Checklist -- this is the authoritative, "
+        f"up-to-date status; treat it as ground truth over anything implied by older emails):\n"
+        f"  {status}\n\n"
+        f"Positioning: {positioning or '(none listed on the doc)'}\n"
+        f"Key facts:\n{key_facts_block}\n"
+        f"Price guide: {price_guide or '(none listed on the doc)'}\n\n"
         f"Weekly email activity:\n{activity_block}"
         f"{style_text}\n\n"
         "--- FORMAT TO FOLLOW (reproduce this structure exactly) ---\n"
@@ -353,8 +387,12 @@ def claude_draft_vendor_update(
         "--- INSTRUCTIONS ---\n"
         f"- The landlord's first name is: {first_name}\n"
         "- Write three substantive paragraphs: Activity | Market reading | Recommendation\n"
-        "- Use specific names, dates, and details from the campaign notes and email activity\n"
-        "- If no activity this week, describe ongoing platform marketing and pipeline work\n"
+        "- Use specific names/dates from the weekly email activity where available. Do NOT "
+        "invent enquiries, inspections, or offers that aren't in the activity list or key facts.\n"
+        "- The CURRENT STATUS line above must be reflected accurately -- if it says off-market, "
+        "under offer, etc, the update must not contradict it.\n"
+        "- If no email activity this week, describe ongoing platform marketing referencing the "
+        "positioning/key facts above rather than fabricating specific events.\n"
         "- Do NOT use a formal signature block — end with 'Thank you.' only\n"
         "- Do NOT include 'Edward Ghattas', 'IB Property Sydney', or any sign-off name\n"
         "- Match Eddie's direct, honest, professional tone — he does not soften bad news\n"
@@ -421,11 +459,18 @@ def main() -> None:
     logger.info("Connecting to Gmail...")
     gmail = GmailClient(credentials_path=gmail_creds, token_path=gmail_token)
 
+    logger.info("Connecting to Google Docs (live campaign source)...")
+    docs = DocsClient(credentials_path=gmail_creds, token_path=gmail_token)
+
     ai = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-    listings = load_active_listings()
-    if not listings:
-        logger.error("No active listings found. Exiting.")
+    campaigns = load_active_campaigns(docs)
+    if not campaigns:
+        logger.error(
+            "No active campaigns found in the doc (id=%s). Nothing to draft -- "
+            "check that Eddie has filled in the ACTIVE CAMPAIGNS section.",
+            _CAMPAIGN_DOC_ID,
+        )
         sys.exit(1)
 
     logger.info("Fetching style examples from Sent Items...")
@@ -435,8 +480,8 @@ def main() -> None:
     drafted = 0
     failed = 0
 
-    for listing in listings:
-        address = listing.get("address", "")
+    for campaign in campaigns:
+        address = campaign.get("address", "")
         logger.info("Processing: %s", address)
 
         # 1. Find landlord contact
@@ -457,7 +502,7 @@ def main() -> None:
 
         # 3. Draft with Claude
         subject, html_body = claude_draft_vendor_update(
-            ai, listing, landlord_first_name,
+            ai, campaign, landlord_first_name,
             inbox_snippets, sent_snippets, style_examples,
         )
         logger.info("  Drafted: %s → To: %s", subject, landlord_email)
