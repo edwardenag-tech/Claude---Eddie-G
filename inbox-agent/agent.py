@@ -146,8 +146,8 @@ def run(dry_run: bool = False):
 
     # ── Clean inboxes ─────────────────────────────────────────────────────────
     cleaning_report: dict = {
-        "gmail_archived": 0, "gmail_promoted": 0, "gmail_trashed": 0,
-        "outlook_archived": 0, "outlook_promoted": 0, "outlook_deleted": 0,
+        "gmail_archived": 0, "gmail_promoted": 0, "gmail_trashed": 0, "gmail_aggressive_deleted": 0,
+        "outlook_archived": 0, "outlook_promoted": 0, "outlook_deleted": 0, "outlook_aggressive_deleted": 0,
         "actions": [],
     }
 
@@ -156,17 +156,24 @@ def run(dry_run: bool = False):
     else:
         logger.info("Cleaning inboxes…")
         from cleaner import InboxCleaner
-        cleaner = InboxCleaner(gmail_client=gmail, outlook_client=outlook)
+        cleaner = InboxCleaner(
+            gmail_client=gmail,
+            outlook_client=outlook,
+            anthropic_api_key=cfg["anthropic_api_key"],
+            user_addresses=[cfg["user_gmail"], cfg["user_outlook"]],
+        )
         cleaning_report = cleaner.run_all()
         logger.info(
-            "Cleaning done — Gmail: %d archived, %d promoted, %d trashed | "
-            "Outlook: %d archived, %d promoted, %d deleted",
+            "Cleaning done — Gmail: %d archived, %d promoted, %d trashed, %d AI-deleted | "
+            "Outlook: %d archived, %d promoted, %d deleted, %d AI-deleted",
             cleaning_report["gmail_archived"],
             cleaning_report["gmail_promoted"],
             cleaning_report["gmail_trashed"],
+            cleaning_report["gmail_aggressive_deleted"],
             cleaning_report["outlook_archived"],
             cleaning_report["outlook_promoted"],
             cleaning_report["outlook_deleted"],
+            cleaning_report["outlook_aggressive_deleted"],
         )
 
     # ── Generate to-do list ───────────────────────────────────────────────────

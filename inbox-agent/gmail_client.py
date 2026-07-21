@@ -224,6 +224,7 @@ class GmailClient:
             "subject": headers.get("Subject", "(no subject)"),
             "from": headers.get("From", ""),
             "to": headers.get("To", ""),
+            "cc": headers.get("Cc", ""),
             "date": headers.get("Date", ""),
             "snippet": message.get("snippet", ""),
             "body": body[:3000],

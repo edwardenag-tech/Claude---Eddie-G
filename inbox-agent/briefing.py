@@ -60,8 +60,8 @@ def _cleaning_summary(report: Dict) -> str:
     total = sum(
         report.get(k, 0)
         for k in (
-            "gmail_archived", "gmail_promoted", "gmail_trashed",
-            "outlook_archived", "outlook_promoted", "outlook_deleted",
+            "gmail_archived", "gmail_promoted", "gmail_trashed", "gmail_aggressive_deleted",
+            "outlook_archived", "outlook_promoted", "outlook_deleted", "outlook_aggressive_deleted",
         )
     )
 
@@ -79,18 +79,25 @@ def _cleaning_summary(report: Dict) -> str:
             f'<td style="text-align:right;padding:4px 0;">{o}</td></tr>'
         )
 
+    gmail_total = (
+        report.get("gmail_archived", 0) + report.get("gmail_promoted", 0)
+        + report.get("gmail_trashed", 0) + report.get("gmail_aggressive_deleted", 0)
+    )
+    outlook_total = (
+        report.get("outlook_archived", 0) + report.get("outlook_promoted", 0)
+        + report.get("outlook_deleted", 0) + report.get("outlook_aggressive_deleted", 0)
+    )
+
     rows = "".join([
         row("Archived", "📥", "gmail_archived", "outlook_archived"),
         row("→ Promotions", "🏷️", "gmail_promoted", "outlook_promoted"),
         row("Trashed / Deleted", "🗑️", "gmail_trashed", "outlook_deleted"),
+        row("Deleted (AI-judged: competitor spam / irrelevant CC)", "🤖",
+            "gmail_aggressive_deleted", "outlook_aggressive_deleted"),
         f'<tr style="border-top:2px solid #e5e7eb;font-weight:600;">'
         f'<td style="padding:6px 20px 4px 0;">Total</td>'
-        f'<td style="text-align:right;padding:6px 12px 4px;">'
-        f'{report.get("gmail_archived",0)+report.get("gmail_promoted",0)+report.get("gmail_trashed",0)}'
-        f'</td>'
-        f'<td style="text-align:right;padding:6px 0 4px;">'
-        f'{report.get("outlook_archived",0)+report.get("outlook_promoted",0)+report.get("outlook_deleted",0)}'
-        f'</td></tr>',
+        f'<td style="text-align:right;padding:6px 12px 4px;">{gmail_total}</td>'
+        f'<td style="text-align:right;padding:6px 0 4px;">{outlook_total}</td></tr>',
     ])
 
     table = (

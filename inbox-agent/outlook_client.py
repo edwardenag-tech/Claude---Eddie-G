@@ -139,8 +139,8 @@ class OutlookClient:
             "$top": top,
             "$orderby": "receivedDateTime desc",
             "$select": (
-                "id,subject,from,receivedDateTime,isRead,importance,"
-                "bodyPreview,body,hasAttachments,conversationId,internetMessageId"
+                "id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,"
+                "importance,bodyPreview,body,hasAttachments,conversationId,internetMessageId"
             ),
         }
         if filter_query:
@@ -292,6 +292,14 @@ class OutlookClient:
     # ─── Data extraction ─────────────────────────────────────────────────────
 
     @staticmethod
+    def _recipients_to_str(recipients: List[Dict]) -> str:
+        return ", ".join(
+            r.get("emailAddress", {}).get("address", "")
+            for r in (recipients or [])
+            if r.get("emailAddress", {}).get("address")
+        )
+
+    @staticmethod
     def extract_email_data(message: Dict) -> Dict:
         """Flatten a raw Graph API message object into a simple dict."""
         sender = message.get("from", {}).get("emailAddress", {})
@@ -305,6 +313,8 @@ class OutlookClient:
             "subject": message.get("subject", "(no subject)"),
             "from": sender.get("address", ""),
             "from_name": sender.get("name", ""),
+            "to": OutlookClient._recipients_to_str(message.get("toRecipients", [])),
+            "cc": OutlookClient._recipients_to_str(message.get("ccRecipients", [])),
             "date": message.get("receivedDateTime", ""),
             "snippet": message.get("bodyPreview", ""),
             "body": body_text,
