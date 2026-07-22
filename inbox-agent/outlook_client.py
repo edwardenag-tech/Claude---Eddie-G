@@ -266,6 +266,25 @@ class OutlookClient:
             return True
         return False
 
+    def send_reply(self, msg_id: str, body_html: str) -> bool:
+        """Send a reply to an existing message immediately (NOT a draft).
+
+        Uses POST /me/messages/{id}/reply, which sends to the original
+        sender and saves a copy to Sent Items automatically. This is
+        irreversible the moment it returns True -- only call it from a path
+        that has already been explicitly gated (see draft_agent.py's
+        AUTO_SEND_ENABLED + quality-bar check). There is no dry-run mode for
+        this specific call; test with send_email/drafts first.
+        """
+        payload = {"comment": body_html}
+        resp = self._post(f"/me/messages/{msg_id}/reply", payload)
+        # /reply returns 202 Accepted with an empty body -- _post treats that as {}
+        if resp is not None:
+            logger.info("Outlook: SENT reply to message id=%s", msg_id)
+            return True
+        logger.error("Outlook: send_reply failed for message id=%s", msg_id)
+        return False
+
     # ─── Folders ─────────────────────────────────────────────────────────────
 
     def _get_or_create_folder(self, folder_name: str) -> Optional[str]:
