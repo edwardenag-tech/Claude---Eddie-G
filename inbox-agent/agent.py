@@ -176,6 +176,18 @@ def run(dry_run: bool = False):
             cleaning_report["outlook_aggressive_deleted"],
         )
 
+    # ── Draft enquiry replies ─────────────────────────────────────────────────
+    if dry_run:
+        logger.info("[DRY RUN] Skipping enquiry-reply drafting")
+    else:
+        logger.info("Drafting enquiry replies…")
+        try:
+            from draft_agent import main as draft_agent_main
+            draft_agent_main()
+            logger.info("Enquiry-reply drafting done")
+        except Exception as exc:
+            logger.error("Enquiry-reply drafting failed (continuing): %s", exc)
+
     # ── Generate to-do list ───────────────────────────────────────────────────
     todo_list = ""
     if cfg["anthropic_api_key"]:
