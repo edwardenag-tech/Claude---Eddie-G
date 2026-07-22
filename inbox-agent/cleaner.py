@@ -6,13 +6,33 @@ Cleaning rules:
   - Trash obvious spam
   - NEVER auto-action emails that look personal, are from known contacts,
     or mention real estate deal keywords
+
+Optional aggressive-delete pass (added 2026-07-22, OFF by default):
+  Per Eddie's explicit call, two categories should be deleted outright rather
+  than archived or left as "keep": (1) other agents' "just listed" / market-
+  update spam, and (2) emails where Eddie is only CC'd and the content isn't
+  relevant to him. Both are judgment calls that plain regex over-includes on
+  (the broad _DEAL_KEYWORDS list currently marks almost anything mentioning
+  "listing" or "commercial" as untouchable "keep") -- so per Eddie's own
+  instruction this is approximated via Claude classification, not rigid
+  keyword rules. This pass only runs if an anthropic_api_key is passed to
+  InboxCleaner AND is_aggressive_delete_enabled() is True (env var
+  AGGRESSIVE_DELETE_ENABLED=true) -- it is deliberately double-gated so
+  pulling this code does not silently change live behaviour. Do not enable
+  it against a real inbox without first reviewing real flagged examples --
+  see [[feedback-inbox-agent-approval-process]] in Claude's memory.
 """
 
+import os
 import re
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def is_aggressive_delete_enabled() -> bool:
+    return os.getenv("AGGRESSIVE_DELETE_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
 # ─── Classification patterns ─────────────────────────────────────────────────
 
@@ -128,27 +148,116 @@ def classify(email: Dict) -> str:
     return "archive"
 
 
+# ─── Optional Claude-judged aggressive delete (opt-in, see module docstring) ──
+
+_AGGRESSIVE_DELETE_PROMPT = """You are helping a commercial real estate agent (Eddie, IB Property Sydney) triage his inbox. Below is one email that a rule-based filter marked "keep" because it mentioned a real-estate-related keyword -- but the keyword filter is too broad and lets junk through.
+
+Eddie's explicit instruction: delete outright (don't just archive) if EITHER of these is true:
+1. It's another agent/agency announcing a property they just listed, a market update, or similar promotional "just hit the market" style content -- not something addressed to Eddie personally about his own deals.
+2. Eddie is only CC'd (not a direct recipient) and the content isn't actually relevant or actionable for him -- e.g. an internal thread between other people he doesn't need to track.
+
+If NEITHER applies -- it's a real client/deal/personal email, or you're not confident -- say KEEP. When in doubt, KEEP; false deletes are far worse than a missed archive.
+
+Email:
+From: {sender}
+To/Cc note: {recipient_note}
+Subject: {subject}
+Body preview: {body}
+
+Respond with exactly one word: DELETE or KEEP."""
+
+
+def claude_judge_aggressive_delete(
+    email: Dict,
+    ai_client,
+    is_cc_only: bool = False,
+) -> bool:
+    """Ask Claude whether this 'keep'-classified email should actually be deleted.
+
+    Returns True only for a confident DELETE. Any error, ambiguous response,
+    or KEEP verdict returns False (never delete on uncertainty).
+    """
+    recipient_note = (
+        "Eddie is CC'd, not a direct recipient" if is_cc_only else "Eddie is a direct recipient"
+    )
+    prompt = _AGGRESSIVE_DELETE_PROMPT.format(
+        sender=email.get("from", ""),
+        recipient_note=recipient_note,
+        subject=email.get("subject", ""),
+        body=(email.get("body") or email.get("snippet") or "")[:800],
+    )
+    try:
+        response = ai_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=10,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        verdict = response.content[0].text.strip().upper() if response.content else ""
+        return verdict.startswith("DELETE")
+    except Exception as exc:
+        logger.error("Aggressive-delete Claude judgment failed for '%s': %s",
+                     email.get("subject", "")[:60], exc)
+        return False
+
+
 # ─── Cleaner class ───────────────────────────────────────────────────────────
+
+def _is_cc_only(email: Dict, user_addresses: List[str]) -> bool:
+    """Best-effort check: is the user only in Cc, not To? Defaults to False
+    (assume direct recipient) if To/Cc data isn't available."""
+    to_field = (email.get("to") or "").lower()
+    cc_field = (email.get("cc") or "").lower()
+    if not to_field and not cc_field:
+        return False
+    for addr in user_addresses:
+        addr = addr.lower()
+        if addr in cc_field and addr not in to_field:
+            return True
+    return False
+
 
 class InboxCleaner:
     """Orchestrates cleaning for both Gmail and Outlook inboxes."""
 
-    def __init__(self, gmail_client=None, outlook_client=None):
+    def __init__(
+        self,
+        gmail_client=None,
+        outlook_client=None,
+        anthropic_api_key: Optional[str] = None,
+        user_addresses: Optional[List[str]] = None,
+    ):
         self.gmail = gmail_client
         self.outlook = outlook_client
+        self.user_addresses = user_addresses or []
+        self._ai = None
+        if anthropic_api_key and is_aggressive_delete_enabled():
+            import anthropic
+            self._ai = anthropic.Anthropic(api_key=anthropic_api_key)
+            logger.info("Aggressive-delete pass ENABLED (AGGRESSIVE_DELETE_ENABLED=true)")
         self.report: Dict = {
             "gmail_archived": 0,
             "gmail_promoted": 0,
             "gmail_trashed": 0,
+            "gmail_aggressive_deleted": 0,
             "outlook_archived": 0,
             "outlook_promoted": 0,
             "outlook_deleted": 0,
+            "outlook_aggressive_deleted": 0,
             "actions": [],
         }
 
     def _log_action(self, action: str):
         self.report["actions"].append(action)
         logger.info(action)
+
+    def _aggressive_delete_check(self, email: Dict) -> bool:
+        """For a 'keep'-classified email, ask Claude if it should be deleted
+        anyway per Eddie's two aggressive-delete categories. No-op (returns
+        False) unless the feature is enabled and an AI client is configured."""
+        if not self._ai:
+            return False
+        is_cc_only = _is_cc_only(email, self.user_addresses)
+        return claude_judge_aggressive_delete(email, self._ai, is_cc_only=is_cc_only)
 
     # ─── Gmail ────────────────────────────────────────────────────────────────
 
@@ -181,7 +290,10 @@ class InboxCleaner:
                     self.report["gmail_archived"] += 1
                     self._log_action(f"[Gmail] ARCHIVED: {subj}")
 
-            # decision == "keep" → do nothing
+            elif decision == "keep" and self._aggressive_delete_check(email):
+                if self.gmail.trash_message(email["id"]):
+                    self.report["gmail_aggressive_deleted"] += 1
+                    self._log_action(f"[Gmail] TRASHED (AI-judged, competitor/irrelevant-cc): {subj}")
 
     # ─── Outlook ──────────────────────────────────────────────────────────────
 
@@ -214,6 +326,11 @@ class InboxCleaner:
                     self.report["outlook_archived"] += 1
                     self._log_action(f"[Outlook] ARCHIVED: {subj}")
 
+            elif decision == "keep" and self._aggressive_delete_check(email):
+                if self.outlook.delete_message(email["id"]):
+                    self.report["outlook_aggressive_deleted"] += 1
+                    self._log_action(f"[Outlook] DELETED (AI-judged, competitor/irrelevant-cc): {subj}")
+
     # ─── Combined ─────────────────────────────────────────────────────────────
 
     def run_all(self) -> Dict:
@@ -224,8 +341,8 @@ class InboxCleaner:
         total = sum(
             self.report[k]
             for k in (
-                "gmail_archived", "gmail_promoted", "gmail_trashed",
-                "outlook_archived", "outlook_promoted", "outlook_deleted",
+                "gmail_archived", "gmail_promoted", "gmail_trashed", "gmail_aggressive_deleted",
+                "outlook_archived", "outlook_promoted", "outlook_deleted", "outlook_aggressive_deleted",
             )
         )
         logger.info("Inbox cleaning complete — %d total actions", total)
