@@ -279,6 +279,37 @@ class OutlookClient:
             "is_all_day": event.get("isAllDay", False),
         }
 
+    def has_replied(self, conversation_id: str, received_at: str) -> Optional[bool]:
+        """Whether a Sent Items message exists in this conversation after received_at.
+
+        received_at should be a Graph datetime string (e.g. receivedDateTime) --
+        sentDateTime and receivedDateTime are both UTC 'Z' timestamps from Graph,
+        so a plain string comparison is sufficient without parsing.
+
+        True/False when known; None if conversation_id is missing or the lookup
+        fails. Queries only Sent Items filtered by conversationId ($top=1) --
+        cheap, not a full conversation or mailbox scan.
+        """
+        if not conversation_id:
+            return None
+
+        result = self._get(
+            "/me/mailFolders/SentItems/messages",
+            params={
+                "$filter": f"conversationId eq '{conversation_id}'",
+                "$select": "id,sentDateTime",
+                "$orderby": "sentDateTime desc",
+                "$top": 1,
+            },
+        )
+        if result is None:
+            return None
+
+        sent_items = result.get("value", [])
+        if not sent_items:
+            return False
+        return sent_items[0].get("sentDateTime", "") > received_at
+
     # ─── Actions ─────────────────────────────────────────────────────────────
 
     def move_message(self, msg_id: str, destination_folder_id: str) -> bool:
@@ -383,6 +414,7 @@ class OutlookClient:
 
         return {
             "id": message.get("id", ""),
+            "conversation_id": message.get("conversationId", ""),
             "subject": message.get("subject", "(no subject)"),
             "from": sender.get("address", ""),
             "from_name": sender.get("name", ""),

@@ -101,6 +101,36 @@ class GmailClient:
         before = (datetime.now() - timedelta(days=older_than_days)).strftime("%Y/%m/%d")
         return self.get_messages(query=f"in:inbox is:read before:{before}", max_results=200)
 
+    def has_replied(self, thread_id: str, message_id: str) -> Optional[bool]:
+        """Whether this account has sent a message in the thread after message_id.
+
+        True/False when known; None if the lookup fails or message_id can't be
+        found in the thread (callers should treat None as "don't know" rather
+        than "not replied"). Uses threads().get(format='metadata') -- cheap,
+        no message bodies -- rather than scanning the mailbox.
+        """
+        try:
+            thread = (
+                self.service.users()
+                .threads()
+                .get(userId="me", id=thread_id, format="metadata")
+                .execute()
+            )
+        except HttpError as exc:
+            logger.warning("Thread lookup failed for %s: %s", thread_id, exc)
+            return None
+
+        messages = thread.get("messages", [])
+        incoming = next((m for m in messages if m.get("id") == message_id), None)
+        if incoming is None:
+            return None
+
+        incoming_date = int(incoming.get("internalDate", 0))
+        for m in messages:
+            if "SENT" in m.get("labelIds", []) and int(m.get("internalDate", 0)) > incoming_date:
+                return True
+        return False
+
     # ─── Actions ─────────────────────────────────────────────────────────────
 
     def archive_message(self, msg_id: str) -> bool:

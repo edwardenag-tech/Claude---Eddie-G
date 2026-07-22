@@ -145,6 +145,32 @@ def run(dry_run: bool = False):
     gmail_emails = [GmailClient.extract_email_data(m) for m in gmail_raw]
     outlook_emails = [OutlookClient.extract_email_data(m) for m in outlook_raw]
 
+    # ── Detect emails awaiting a reply ────────────────────────────────────────
+    # awaiting_reply is only set True when we positively confirmed no reply was
+    # sent -- a failed or inconclusive lookup leaves it False so we never flag
+    # an email we're not actually sure about.
+    logger.info("Checking which emails are still awaiting a reply…")
+    for email in gmail_emails:
+        awaiting = False
+        try:
+            if gmail:
+                awaiting = gmail.has_replied(email["thread_id"], email["id"]) is False
+        except Exception as exc:
+            logger.warning("Reply-check failed for Gmail message %s: %s", email.get("id"), exc)
+        email["awaiting_reply"] = awaiting
+
+    for email in outlook_emails:
+        awaiting = False
+        try:
+            if outlook:
+                awaiting = outlook.has_replied(email["conversation_id"], email["date"]) is False
+        except Exception as exc:
+            logger.warning("Reply-check failed for Outlook message %s: %s", email.get("id"), exc)
+        email["awaiting_reply"] = awaiting
+
+    awaiting_count = sum(1 for e in gmail_emails + outlook_emails if e["awaiting_reply"])
+    logger.info("Awaiting-reply emails: %d", awaiting_count)
+
     # ── Clean inboxes ─────────────────────────────────────────────────────────
     cleaning_report: dict = {
         "gmail_archived": 0, "gmail_promoted": 0, "gmail_trashed": 0, "gmail_aggressive_deleted": 0,

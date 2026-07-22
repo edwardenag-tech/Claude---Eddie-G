@@ -20,8 +20,9 @@ def _summarise_emails(emails: List[Dict]) -> str:
         importance = ""
         if e.get("importance", "").lower() == "high":
             importance = " [HIGH IMPORTANCE]"
+        awaiting_flag = " [AWAITING REPLY]" if e.get("awaiting_reply") else ""
         lines.append(
-            f"{i:>3}. [{e.get('source', '?').upper():>7}] {unread_flag}{importance}\n"
+            f"{i:>3}. [{e.get('source', '?').upper():>7}] {unread_flag}{importance}{awaiting_flag}\n"
             f"       From: {e.get('from', '')}\n"
             f"    Subject: {e.get('subject', '(no subject)')}\n"
             f"       Date: {e.get('date', '')[:25]}\n"
@@ -56,6 +57,9 @@ His email addresses are edwardenag@gmail.com (personal/Gmail) and edward@ibprope
 Today is {today}.
 
 Below is a summary of his combined inbox. Starred items (★ UNREAD) have not been read yet.
+Items marked [AWAITING REPLY] have been confirmed (by checking the actual email
+thread/conversation) to have NO reply sent from Eddie yet — this is different
+from "unread": a read-but-un-actioned email is exactly what this flag is for.
 
 ---
 {email_block}
@@ -70,10 +74,17 @@ Rules:
 4. Be specific and concrete — "Reply to John Smith re: 45 George St lease renewal offer" not "reply to email".
 5. Flag deadlines or time-sensitive items prominently.
 6. If you spot something in [OUTLOOK] that duplicates [GMAIL], mention it once, note it appears in both.
+7. Every item marked [AWAITING REPLY] goes ONLY in the "✉️ Awaiting Your Reply" section below —
+   do not also duplicate it under Urgent/Important/etc. These are specifically the
+   things Eddie needs to get onto today because he genuinely hasn't responded yet.
 
 Format your response exactly like this (omit any section with no items):
 
 ## Prioritised To-Do — {today}
+
+### ✉️ Awaiting Your Reply
+1. **[action verb + what]** — *[from name/company]* | [Gmail/Outlook]
+   → [one-line context note if helpful]
 
 ### 🔴 Urgent — Do Today
 1. **[action verb + what]** — *[from name/company]* | [Gmail/Outlook]
