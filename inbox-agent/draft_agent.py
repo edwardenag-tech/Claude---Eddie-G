@@ -25,6 +25,8 @@ import anthropic
 
 from outlook_client import OutlookClient
 from gmail_client import GmailClient
+from docs_client import DocsClient
+from campaign_doc_parser import parse_active_campaigns
 
 # ─── Bootstrap ───────────────────────────────────────────────────────────────
 
@@ -42,6 +44,21 @@ USER_GMAIL = os.getenv("USER_GMAIL", "edwardenag@gmail.com").lower()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 CATEGORIES = ["lease_enquiry", "sale_enquiry", "vendor_update", "landlord_query", "general"]
+
+# Same live campaign doc vendor_update_agent.py reads -- see docs_client.py /
+# campaign_doc_parser.py. Eddie keeps its Status/price/key-facts fields in
+# sync with the Dropbox Campaign Checklist; when an enquiry matches an
+# address here, this is treated as MORE authoritative than listings_db.json.
+CAMPAIGN_DOC_ID = os.getenv(
+    "CAMPAIGN_DOC_ID", "12gKTGiqwqgEc5iBnypfKFP79bEKThc1ltBOnIvC8Mrk"
+)
+
+# Auto-send is OFF unless both are true: this env var, AND an anthropic_api_key
+# is available (already required anyway). Double-gated deliberately -- see
+# meets_send_quality_bar() and main(). Do not flip this on without reviewing
+# real drafted examples first (see feedback-inbox-agent-approval-process in
+# Claude's memory).
+AUTO_SEND_ENABLED = os.getenv("AUTO_SEND_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
 # ─── Newsletter / Automated detection ────────────────────────────────────────
 
@@ -309,6 +326,39 @@ def find_listing_in_db(db: Dict, address: str) -> Optional[Dict]:
         if street_num in db_addr and street_word in db_addr:
             return listing
 
+    return None
+
+
+# ─── Campaign doc (live, most-authoritative source) ────────────────────────────
+
+def load_campaigns_from_doc(docs: Optional[DocsClient]) -> List[Dict]:
+    """Fetch + parse the live Campaign Enquiry Reply Templates doc. Returns
+    [] on any failure (missing docs client, fetch error, no active campaigns)
+    -- callers should fall back to listings_db.json / email search, never crash."""
+    if not docs:
+        return []
+    doc_text = docs.fetch_doc_text(CAMPAIGN_DOC_ID)
+    if doc_text is None:
+        logger.warning("Could not fetch campaign doc (id=%s) -- falling back to listings_db.json", CAMPAIGN_DOC_ID)
+        return []
+    return parse_active_campaigns(doc_text)
+
+
+def find_campaign_for_address(campaigns: List[Dict], address: str) -> Optional[Dict]:
+    """Same street-number + street-word matching as find_listing_in_db, applied
+    to campaign-doc entries instead of listings_db.json entries."""
+    if not address:
+        return None
+    addr_lower = address.lower()
+    num_m = re.search(r'\b(\d+\w?)\b', addr_lower)
+    street_m = re.search(r'\d+\w?\s+(\w+)', addr_lower)
+    if not num_m or not street_m:
+        return None
+    street_num, street_word = num_m.group(1), street_m.group(1)
+    for campaign in campaigns:
+        camp_addr = campaign.get("address", "").lower()
+        if street_num in camp_addr and street_word in camp_addr:
+            return campaign
     return None
 
 
@@ -590,13 +640,16 @@ def collect_property_data(
     email: Dict,
     category: str,
     listings_db: Optional[Dict] = None,
+    campaigns: Optional[List[Dict]] = None,
 ) -> Dict[str, Optional[str]]:
     """
     Gather property data in priority order:
-      DB) listings_db.json — pre-scraped from Eddie's own vendor update emails (primary)
-      A)  The enquiry email — raw HTML body
-      B)  Sent Items search by address (only when no DB match)
-      C)  Full inbox search by address (only when no DB match)
+      DOC) Campaign Enquiry Reply Templates Google Doc — Eddie's live, manually
+           maintained source (see load_campaigns_from_doc) — MOST authoritative
+      DB)  listings_db.json — pre-scraped from Eddie's own vendor update emails
+      A)   The enquiry email — raw HTML body
+      B)   Sent Items search by address (only when no DOC/DB match)
+      C)   Full inbox search by address (only when no DOC/DB match)
     """
     details: Dict[str, Optional[str]] = {
         "address": None,
@@ -619,6 +672,11 @@ def collect_property_data(
         "outgoings": None,
         "car_spaces": None,
         "zoning": None,
+        # from the campaign doc specifically -- surfaced to Claude as extra
+        # authoritative context, not slotted into the fixed template fields above
+        "confirmed_status": None,
+        "extra_facts": None,
+        "special_notes": None,
     }
 
     subject = email.get("subject", "")
@@ -651,9 +709,36 @@ def collect_property_data(
     _merge_into(details, _parse_property_fields(f"{subject}\n{html_plain}", category))
     logger.debug("  [A] After email body: %s", {k: v for k, v in details.items() if v})
 
+    # ── Source DOC: live Campaign Enquiry Reply Templates Google Doc ───────────
+    doc_matched = False
+    if campaigns and details.get("address"):
+        campaign_match = find_campaign_for_address(campaigns, details["address"])
+        if campaign_match:
+            logger.info("  [DOC] Match in campaign doc: %s", campaign_match.get("address"))
+            if campaign_match.get("price_guide"):
+                # "Price guide" means asking_rent for a lease, asking_price for a sale --
+                # a bug here silently mismatches the field claude_draft_reply's lease
+                # branch actually reads (asking_rent, not asking_price).
+                if category == "lease_enquiry":
+                    details["asking_rent"] = campaign_match["price_guide"]
+                else:
+                    details["asking_price"] = campaign_match["price_guide"]
+            if campaign_match.get("im_link"):
+                details["im_url"] = campaign_match["im_link"]
+            if campaign_match.get("status"):
+                details["confirmed_status"] = campaign_match["status"]
+            if campaign_match.get("key_facts"):
+                details["extra_facts"] = campaign_match["key_facts"]
+            if campaign_match.get("special_notes"):
+                details["special_notes"] = campaign_match["special_notes"]
+            if campaign_match.get("positioning") and not details.get("vacancy_note"):
+                details["vacancy_note"] = campaign_match["positioning"]
+            doc_matched = True
+            logger.debug("  [DOC] After campaign doc merge: %s", {k: v for k, v in details.items() if v})
+
     # ── Source DB: listings_db.json (pre-scraped from vendor update emails) ────
     db_matched = False
-    if listings_db and details.get("address"):
+    if not doc_matched and listings_db and details.get("address"):
         db_match = find_listing_in_db(listings_db, details["address"])
         if db_match:
             logger.info("  [DB] Match in listings_db: %s", db_match.get("address"))
@@ -685,7 +770,7 @@ def collect_property_data(
             db_matched = True
             logger.debug("  [DB] After DB merge: %s", {k: v for k, v in details.items() if v})
 
-    if not db_matched:
+    if not doc_matched and not db_matched:
         # ── Source B: Sent Items search by street address ──────────────────────
         short_addr = _shorten_address(details.get("address"))
         if short_addr:
@@ -878,6 +963,8 @@ def claude_draft_reply(
             highlights.append(f"• Car Spaces: {n} car space{'s' if n != '1' else ''}")
         if building_name:
             highlights.append(f"• Part of the award-winning {building_name} development")
+        for fact in (ld.get("extra_facts") or []):
+            highlights.append(f"• {fact}")
         highlights_str = "\n".join(highlights)
 
         nestled_para = (
@@ -893,6 +980,19 @@ def claude_draft_reply(
                 f"{examples_text}\n--- End style reference ---"
             )
 
+        status_note = ""
+        if ld.get("confirmed_status"):
+            status_note = (
+                "\n\nCONFIRMED CURRENT STATUS (from Eddie's live campaign doc -- "
+                f"treat as ground truth, do not contradict): {ld['confirmed_status']}"
+            )
+        special_notes_note = ""
+        if ld.get("special_notes"):
+            special_notes_note = (
+                "\n\nSPECIAL NOTES -- do not violate these under any circumstances: "
+                f"{ld['special_notes']}"
+            )
+
         prompt = (
             "You are drafting a reply on behalf of Edward Ghattas, "
             "commercial real estate agent at IB Property Sydney.\n\n"
@@ -901,8 +1001,10 @@ def claude_draft_reply(
             f"Subject: {email.get('subject', '')}\n"
             f"Body:\n{email.get('body', '')[:1200]}"
             f"{attachments_note}"
-            f"{style_block}\n\n"
-            "--- EXACT TEMPLATE TO USE ---\n"
+            f"{style_block}"
+            f"{status_note}"
+            f"{special_notes_note}"
+            "\n\n--- EXACT TEMPLATE TO USE ---\n"
             "Reproduce this structure EXACTLY. Fill in [sender's first name]. "
             "Leave any [PLEASE ADD - X] untouched:\n\n"
             "Hi [sender's first name],\n\n"
@@ -946,6 +1048,8 @@ def claude_draft_reply(
         bullets.append(
             f"• Prime location near {suburb} village, train station, cafés, restaurants, and amenities"
         )
+        for fact in (ld.get("extra_facts") or []):
+            bullets.append(f"• {fact}")
         bullets_str = "\n".join(bullets)
 
         # Lease paragraph (extracted sentences, Claude reformats to final paragraph)
@@ -976,6 +1080,19 @@ def claude_draft_reply(
                 f"{examples_text}\n--- End style reference ---"
             )
 
+        status_note = ""
+        if ld.get("confirmed_status"):
+            status_note = (
+                "\n\nCONFIRMED CURRENT STATUS (from Eddie's live campaign doc -- "
+                f"treat as ground truth, do not contradict): {ld['confirmed_status']}"
+            )
+        special_notes_note = ""
+        if ld.get("special_notes"):
+            special_notes_note = (
+                "\n\nSPECIAL NOTES -- do not violate these under any circumstances: "
+                f"{ld['special_notes']}"
+            )
+
         prompt = (
             "You are drafting a reply on behalf of Edward Ghattas, "
             "commercial real estate agent at IB Property Sydney.\n\n"
@@ -984,8 +1101,10 @@ def claude_draft_reply(
             f"Subject: {email.get('subject', '')}\n"
             f"Body:\n{email.get('body', '')[:1200]}"
             f"{attachments_note}"
-            f"{style_block}\n\n"
-            "--- EXACT TEMPLATE TO USE ---\n"
+            f"{style_block}"
+            f"{status_note}"
+            f"{special_notes_note}"
+            "\n\n--- EXACT TEMPLATE TO USE ---\n"
             "Reproduce this structure EXACTLY. Fill in [sender's first name]. "
             "Leave any [PLEASE ADD - X] untouched:\n\n"
             "Hi [sender's first name],\n\n"
@@ -1071,6 +1190,36 @@ def claude_draft_reply(
     return reply_subject, html_body
 
 
+# ─── Send quality gate ("Sirius Cafe" bar) ─────────────────────────────────────
+
+_PLACEHOLDER_RE = re.compile(r"\[PLEASE ADD[^\]]*\]|\[SUBURB\]|\[LANDLORD[^\]]*\]")
+
+
+def meets_send_quality_bar(category: str, html_body: str) -> Tuple[bool, str]:
+    """Decide whether a drafted reply is complete enough to auto-send.
+
+    Returns (ok, reason). This is deliberately conservative -- it's a proxy
+    for Eddie's "Sirius Cafe" quality bar (see reference-inbox-automation-rules
+    in Claude's memory): every field filled in, no follow-up questions needed,
+    one shot. Currently checks:
+      1. Category is lease_enquiry or sale_enquiry only (Eddie's stated
+         auto-send scope -- everything else stays draft-only)
+      2. No unresolved [PLEASE ADD - X] / [SUBURB] / [LANDLORD...] placeholder
+         survived into the final HTML (these mean collect_property_data
+         couldn't find real data -- Source DOC/DB/email/Sent-Items all came
+         up empty for that field)
+    This is a v1 heuristic, not a full quality grader -- treat a True here as
+    "eligible to consider", not "guaranteed good". Real rollout requires
+    Eddie reviewing actual flagged examples first.
+    """
+    if category not in ("lease_enquiry", "sale_enquiry"):
+        return False, f"category '{category}' is outside Eddie's auto-send scope (enquiry replies only)"
+    placeholders = _PLACEHOLDER_RE.findall(html_body)
+    if placeholders:
+        return False, f"unresolved placeholder(s) in draft: {placeholders}"
+    return True, "no unresolved placeholders, category in auto-send scope"
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main(max_emails: Optional[int] = None) -> None:
@@ -1097,15 +1246,33 @@ def main(max_emails: Optional[int] = None) -> None:
     logger.info("Connecting to Gmail...")
     gmail = GmailClient(credentials_path=gmail_creds, token_path=gmail_token)
 
+    logger.info("Connecting to Google Docs (live campaign source)...")
+    try:
+        docs = DocsClient(credentials_path=gmail_creds, token_path=gmail_token)
+    except Exception as exc:
+        logger.warning("Docs client unavailable (%s) -- falling back to listings_db.json only", exc)
+        docs = None
+
     ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    # Load property listings database
+    # Load property listings database (fallback source, see collect_property_data)
     listings_db = load_listings_db()
     n_listings = len(listings_db.get("listings", []))
     if n_listings:
         logger.info("Loaded listings_db.json: %d listing(s)", n_listings)
     else:
         logger.info("listings_db.json not found or empty — run refresh_listings_db.py to build it")
+
+    # Load live campaigns from the Google Doc (primary source, see collect_property_data)
+    campaigns = load_campaigns_from_doc(docs)
+    logger.info("Loaded %d active campaign(s) from the live doc", len(campaigns))
+
+    if AUTO_SEND_ENABLED:
+        logger.warning(
+            "AUTO_SEND_ENABLED=true — enquiry replies that clear the quality bar "
+            "(meets_send_quality_bar) will be SENT, not just drafted. Make sure "
+            "Eddie has explicitly reviewed real examples before this var was set."
+        )
 
     # Fetch style examples from Sent Items (used for enquiry drafts)
     logger.info("Fetching sent enquiry reply examples for style matching...")
@@ -1118,6 +1285,7 @@ def main(max_emails: Optional[int] = None) -> None:
     logger.info("Retrieved %d messages", len(raw_messages))
 
     drafted = 0
+    auto_sent = 0
     skipped = 0
 
     if max_emails is not None:
@@ -1185,7 +1353,7 @@ def main(max_emails: Optional[int] = None) -> None:
             else:
                 # Fall back to listings_db / multi-source data collection
                 listing_details = collect_property_data(
-                    outlook, raw, email, category, listings_db=listings_db
+                    outlook, raw, email, category, listings_db=listings_db, campaigns=campaigns
                 )
                 logger.info("  Property data: %s", {k: v for k, v in listing_details.items() if v})
 
@@ -1197,14 +1365,31 @@ def main(max_emails: Optional[int] = None) -> None:
             sent_template=sent_template,
         )
 
-        # 4. Save to Outlook Drafts (threaded reply via createReply + PATCH)
+        # 4. Auto-send gate (OFF unless AUTO_SEND_ENABLED=true -- see main() setup
+        #    and meets_send_quality_bar). If it fires, send directly and skip
+        #    draft creation for this email; otherwise fall through to drafting
+        #    exactly as before.
+        if AUTO_SEND_ENABLED and is_enq:
+            ok, reason = meets_send_quality_bar(category, html_body)
+            if ok:
+                sent_ok = outlook.send_reply(msg_id, html_body)
+                if sent_ok:
+                    auto_sent += 1
+                    logger.info("  AUTO-SENT '%s' (%s)", reply_subject, reason)
+                    continue
+                else:
+                    logger.error("  Auto-send failed, falling back to draft for: %s", subject)
+            else:
+                logger.info("  Not auto-sending (%s) -- drafting instead", reason)
+
+        # 5. Save to Outlook Drafts (threaded reply via createReply + PATCH)
         outlook_id = outlook_create_draft(
             outlook,
             email_id=msg_id,
             html_body=html_body,
         )
 
-        # 5. Save to Gmail Drafts (reply headers from Outlook's internetMessageId)
+        # 6. Save to Gmail Drafts (reply headers from Outlook's internetMessageId)
         internet_message_id = raw.get("internetMessageId", "")
         plain_body = re.sub(r"<[^>]+>", " ", html_body)
         plain_body = re.sub(r"\s{2,}", " ", plain_body).strip()
@@ -1217,7 +1402,7 @@ def main(max_emails: Optional[int] = None) -> None:
             in_reply_to=internet_message_id,
         )
 
-        # 6. Log outcome
+        # 7. Log outcome
         if outlook_id or gmail_id:
             drafted += 1
             logger.info(
@@ -1230,8 +1415,9 @@ def main(max_emails: Optional[int] = None) -> None:
             logger.warning("  Both draft saves failed for: %s", subject)
 
     logger.info(
-        "=== Done: %d draft(s) created, %d email(s) skipped ===",
+        "=== Done: %d draft(s) created, %d auto-sent, %d email(s) skipped ===",
         drafted,
+        auto_sent,
         skipped,
     )
 
