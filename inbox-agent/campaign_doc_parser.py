@@ -40,6 +40,13 @@ _BLOCK_DELIM = re.compile(r"^\s*={3,}\s*$")
 _ACTIVE_CAMPAIGNS_HEADER = re.compile(r"^\s*ACTIVE CAMPAIGNS\s*$", re.IGNORECASE)
 _BULLET_PREFIX = re.compile(r"^\s*[-*•]\s*")
 
+# Free-text markers Eddie uses in the doc to flag a field as needing his
+# attention (e.g. "Status: NEEDS EDDIE TO CONFIRM inspection time").
+_ATTENTION_MARKERS = re.compile(
+    r"needs?\s+eddie|eddie\s+to\s+(confirm|review|check|fill|update)|attention needed",
+    re.IGNORECASE,
+)
+
 
 def _clean_placeholder(value: str) -> str:
     """Strip [square-bracket placeholder] wrapping so unfilled fields read as empty."""
@@ -132,3 +139,38 @@ def parse_active_campaigns(doc_text: str) -> List[Dict]:
             campaigns.append(campaign)
 
     return campaigns
+
+
+def summarize_campaign_highlights(campaigns: List[Dict]) -> List[Dict]:
+    """Produce a short per-campaign highlight for the morning briefing.
+
+    Each returned dict has: address, status, needs_attention (bool), and
+    attention_note (the field text that triggered it, or "" if none).
+    Not a full doc dump -- just enough to scan in a briefing email.
+    """
+    highlights = []
+    for campaign in campaigns:
+        address = campaign.get("address", "")
+        if not address:
+            continue
+
+        attention_note = ""
+        for field in ("status", "positioning", "special_notes"):
+            value = campaign.get(field, "")
+            if value and _ATTENTION_MARKERS.search(value):
+                attention_note = value.strip()
+                break
+        if not attention_note:
+            for fact in campaign.get("key_facts", []):
+                if _ATTENTION_MARKERS.search(fact):
+                    attention_note = fact.strip()
+                    break
+
+        highlights.append({
+            "address": address,
+            "status": (campaign.get("status", "") or "(status not set)").strip(),
+            "needs_attention": bool(attention_note),
+            "attention_note": attention_note,
+        })
+
+    return highlights

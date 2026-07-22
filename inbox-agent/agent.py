@@ -63,6 +63,7 @@ def load_config() -> dict:
         "gmail_credentials_path": str(_HERE / os.environ.get("GMAIL_CREDENTIALS_PATH", "gmail_credentials.json")),
         "gmail_token_path":       str(_HERE / os.environ.get("GMAIL_TOKEN_PATH", "gmail_token.json")),
         "msal_token_cache_path":  str(_HERE / os.environ.get("MSAL_TOKEN_CACHE_PATH", "msal_token_cache.json")),
+        "campaign_doc_id":        os.environ.get("CAMPAIGN_DOC_ID", "12gKTGiqwqgEc5iBnypfKFP79bEKThc1ltBOnIvC8Mrk"),
     }
 
     if not cfg["anthropic_api_key"]:
@@ -206,6 +207,40 @@ def run(dry_run: bool = False):
             "Please check your inboxes manually."
         )
 
+    # ── Fetch today's calendar ────────────────────────────────────────────────
+    calendar_events = None
+    try:
+        if outlook:
+            logger.info("Fetching today's calendar events…")
+            calendar_events = outlook.get_todays_events()
+            logger.info("Calendar: %d event(s) today", len(calendar_events))
+        else:
+            logger.info("Outlook not connected — skipping calendar")
+    except Exception as exc:
+        logger.error("Calendar fetch failed (continuing): %s", exc)
+        calendar_events = None
+
+    # ── Fetch campaign highlights ─────────────────────────────────────────────
+    campaign_highlights = []
+    try:
+        logger.info("Fetching campaign highlights from live doc…")
+        from docs_client import DocsClient
+        from campaign_doc_parser import parse_active_campaigns, summarize_campaign_highlights
+        docs_client = DocsClient(
+            credentials_path=cfg["gmail_credentials_path"],
+            token_path=cfg["gmail_token_path"],
+        )
+        doc_text = docs_client.fetch_doc_text(cfg["campaign_doc_id"])
+        if doc_text:
+            campaigns = parse_active_campaigns(doc_text)
+            campaign_highlights = summarize_campaign_highlights(campaigns)
+            logger.info("Campaign highlights: %d active campaign(s)", len(campaign_highlights))
+        else:
+            logger.warning("Campaign doc returned no content")
+    except Exception as exc:
+        logger.error("Campaign highlights fetch failed (continuing): %s", exc)
+        campaign_highlights = []
+
     # ── Send morning briefing ─────────────────────────────────────────────────
     if dry_run:
         logger.info("[DRY RUN] Skipping briefing send. To-do list preview:")
@@ -221,6 +256,8 @@ def run(dry_run: bool = False):
             outlook_new=outlook_emails,
             cleaning_report=cleaning_report,
             notify_emails=cfg["notify_emails"],
+            calendar_events=calendar_events,
+            campaign_highlights=campaign_highlights,
         )
         if success:
             logger.info("Morning briefing sent successfully!")

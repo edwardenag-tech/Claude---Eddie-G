@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import markdown
 import pytz
@@ -53,6 +53,83 @@ def _email_table(emails: List[Dict], max_rows: int = 25) -> str:
         f'<tbody>{"".join(rows)}{overflow}</tbody>'
         "</table>"
     )
+
+
+def _format_event_time(dt_str: str) -> str:
+    """Format a Graph 'YYYY-MM-DDTHH:MM:SS...' local-time string as '9:00 AM'."""
+    if not dt_str:
+        return ""
+    try:
+        dt = datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return dt_str
+    hour12 = dt.hour % 12 or 12
+    return f"{hour12}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
+
+
+def _calendar_section(events: Optional[List[Dict]]) -> str:
+    """Render today's Outlook calendar events.
+
+    events is None when the calendar fetch failed or wasn't attempted (e.g.
+    the Calendars.Read scope hasn't been consented yet) -- shown as a
+    friendly note rather than an empty table so it reads differently from
+    "no meetings today".
+    """
+    if events is None:
+        return (
+            '<p style="color:#6b7280;font-style:italic;">'
+            "Calendar not connected yet — Outlook needs to re-consent to the "
+            "Calendars.Read scope (run <code>python agent.py --auth</code>).</p>"
+        )
+    if not events:
+        return '<p style="color:#6b7280;font-style:italic;">No events scheduled today.</p>'
+
+    rows = []
+    for e in events:
+        if e.get("is_all_day"):
+            time_str = "All day"
+        else:
+            time_str = f'{_format_event_time(e.get("start", ""))} – {_format_event_time(e.get("end", ""))}'
+        meta_bits = [b for b in (e.get("location", ""), e.get("organizer", "")) if b]
+        meta = " · ".join(meta_bits)
+        rows.append(
+            '<tr>'
+            f'<td style="padding:5px 14px 5px 0;color:#6b7280;white-space:nowrap;font-size:12px;">{time_str}</td>'
+            '<td style="padding:5px 0;">'
+            f'<div style="font-weight:600;">{e.get("subject", "(no subject)")}</div>'
+            + (f'<div style="font-size:12px;color:#6b7280;">{meta}</div>' if meta else "")
+            + '</td></tr>'
+        )
+
+    return (
+        '<table style="width:100%;border-collapse:collapse;font-size:13px;">'
+        f'<tbody>{"".join(rows)}</tbody></table>'
+    )
+
+
+def _campaign_highlights_section(highlights: List[Dict]) -> str:
+    """Render a short per-campaign status line, flagging anything needing Eddie."""
+    if not highlights:
+        return '<p style="color:#6b7280;font-style:italic;">No active campaigns found in the doc.</p>'
+
+    items = []
+    for h in highlights:
+        attention = ""
+        if h.get("needs_attention"):
+            attention = (
+                '<div style="margin-top:4px;padding:4px 8px;background:#fef3c7;'
+                'border-radius:4px;font-size:12px;color:#92400e;">'
+                f'⚠️ Needs Eddie — {h.get("attention_note", "")}</div>'
+            )
+        items.append(
+            '<div style="padding:8px 0;border-bottom:1px solid #f3f4f6;">'
+            f'<div style="font-weight:600;">{h.get("address", "")}</div>'
+            f'<div style="font-size:13px;color:#4b5563;">{h.get("status", "")}</div>'
+            f'{attention}'
+            '</div>'
+        )
+
+    return "".join(items)
 
 
 def _cleaning_summary(report: Dict) -> str:
@@ -136,10 +213,13 @@ def build_briefing_html(
     outlook_new: List[Dict],
     cleaning_report: Dict,
     date_str: str,
+    calendar_events: Optional[List[Dict]] = None,
+    campaign_highlights: Optional[List[Dict]] = None,
 ) -> str:
     """Assemble the full HTML briefing email."""
 
     todo_html = markdown.markdown(todo_md, extensions=["nl2br"])
+    campaign_highlights = campaign_highlights or []
 
     g_count = len(gmail_new)
     o_count = len(outlook_new)
@@ -195,33 +275,45 @@ def build_briefing_html(
     <div style="opacity:.85;font-size:14px;">{date_str} &nbsp;·&nbsp; Eddie G — IB Property Sydney</div>
   </div>
 
-  <!-- Section 1: To-Do -->
+  <!-- Section 1: Today's Calendar -->
   <div style="{section_style}">
-    <h2 style="{h2_style}">1 · Prioritised To-Do List</h2>
+    <h2 style="{h2_style}">1 · Today's Calendar</h2>
+    {_calendar_section(calendar_events)}
+  </div>
+
+  <!-- Section 2: To-Do -->
+  <div style="{section_style}">
+    <h2 style="{h2_style}">2 · Prioritised To-Do List</h2>
     <div class="todo-body">{todo_html}</div>
   </div>
 
-  <!-- Section 2: Gmail -->
+  <!-- Section 3: Campaign Highlights -->
+  <div style="{section_style}">
+    <h2 style="{h2_style}">3 · Campaign Highlights</h2>
+    {_campaign_highlights_section(campaign_highlights)}
+  </div>
+
+  <!-- Section 4: Gmail -->
   <div style="{section_style}">
     <h2 style="{h2_style}">
-      2 · Gmail Inbox
+      4 · Gmail Inbox
       {badge(f"{g_count} emails · {g_unread} unread")}
     </h2>
     {_email_table(gmail_new)}
   </div>
 
-  <!-- Section 3: Outlook -->
+  <!-- Section 5: Outlook -->
   <div style="{section_style}">
     <h2 style="{h2_style}">
-      3 · Outlook Inbox
+      5 · Outlook Inbox
       {badge(f"{o_count} emails · {o_unread} unread")}
     </h2>
     {_email_table(outlook_new)}
   </div>
 
-  <!-- Section 4: Cleaning Report -->
+  <!-- Section 6: Cleaning Report -->
   <div style="{section_style}">
-    <h2 style="{h2_style}">4 · Overnight Cleaning Report</h2>
+    <h2 style="{h2_style}">6 · Overnight Cleaning Report</h2>
     {_cleaning_summary(cleaning_report)}
   </div>
 
@@ -247,6 +339,8 @@ def send_briefing(
     outlook_new: List[Dict],
     cleaning_report: Dict,
     notify_emails: List[str],
+    calendar_events: Optional[List[Dict]] = None,
+    campaign_highlights: Optional[List[Dict]] = None,
 ) -> bool:
     """
     Build the briefing HTML and send it.
@@ -262,6 +356,8 @@ def send_briefing(
         outlook_new=outlook_new,
         cleaning_report=cleaning_report,
         date_str=date_str,
+        calendar_events=calendar_events,
+        campaign_highlights=campaign_highlights,
     )
 
     sent = False

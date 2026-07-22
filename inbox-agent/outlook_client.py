@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
 import msal
+import pytz
 import requests
 
 logger = logging.getLogger(__name__)
@@ -18,11 +19,15 @@ logger = logging.getLogger(__name__)
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 # offline_access is required to get a refresh token so the cache stays valid.
+# Calendars.Read added for the morning briefing's "Today's Calendar" section --
+# a token cached before this was added won't have consent for it (Graph calls
+# will fail with a permission error until Eddie re-runs `python agent.py --auth`).
 SCOPES = [
     "Mail.Read",
     "Mail.ReadWrite",
     "Mail.Send",
     "User.Read",
+    "Calendars.Read",
 ]
 
 
@@ -101,8 +106,11 @@ class OutlookClient:
             "Content-Type": "application/json",
         }
 
-    def _get(self, endpoint: str, params: Dict = None) -> Optional[Dict]:
-        resp = requests.get(f"{GRAPH_BASE}{endpoint}", headers=self._headers, params=params)
+    def _get(self, endpoint: str, params: Dict = None, extra_headers: Dict = None) -> Optional[Dict]:
+        headers = self._headers
+        if extra_headers:
+            headers = {**headers, **extra_headers}
+        resp = requests.get(f"{GRAPH_BASE}{endpoint}", headers=headers, params=params)
         if resp.status_code == 200:
             return resp.json()
         logger.error("Graph GET %s → %s: %s", endpoint, resp.status_code, resp.text[:300])
@@ -224,6 +232,52 @@ class OutlookClient:
             filter_query=f"isRead eq true and receivedDateTime le {before_dt}",
             top=200,
         )
+
+    def get_todays_events(self, tz_name: str = "Australia/Sydney") -> List[Dict]:
+        """Today's calendar events (local calendar day), sorted by start time.
+
+        Uses GET /me/calendarView with a Prefer: outlook.timezone header so
+        Graph returns start/end times already localized to tz_name, rather
+        than UTC. Raises RuntimeError if the request fails -- most likely
+        because the token cache predates the Calendars.Read scope (see
+        SCOPES); callers should catch this and degrade gracefully.
+        """
+        tz = pytz.timezone(tz_name)
+        start_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_local = start_local + timedelta(days=1)
+
+        params = {
+            "startDateTime": start_local.strftime("%Y-%m-%dT%H:%M:%S"),
+            "endDateTime": end_local.strftime("%Y-%m-%dT%H:%M:%S"),
+            "$orderby": "start/dateTime",
+            "$select": "subject,start,end,location,organizer,isAllDay",
+            "$top": 50,
+        }
+        result = self._get(
+            "/me/calendarView",
+            params=params,
+            extra_headers={"Prefer": f'outlook.timezone="{tz_name}"'},
+        )
+        if result is None:
+            raise RuntimeError(
+                "Graph calendarView request failed -- check the Calendars.Read "
+                "scope has been consented (re-run `python agent.py --auth`)"
+            )
+
+        return [self._extract_event_data(e) for e in result.get("value", [])]
+
+    @staticmethod
+    def _extract_event_data(event: Dict) -> Dict:
+        """Flatten a raw Graph calendarView event into a simple dict."""
+        organizer = event.get("organizer", {}).get("emailAddress", {})
+        return {
+            "subject": event.get("subject", "(no subject)"),
+            "start": event.get("start", {}).get("dateTime", ""),
+            "end": event.get("end", {}).get("dateTime", ""),
+            "location": event.get("location", {}).get("displayName", ""),
+            "organizer": organizer.get("name") or organizer.get("address", ""),
+            "is_all_day": event.get("isAllDay", False),
+        }
 
     # ─── Actions ─────────────────────────────────────────────────────────────
 
