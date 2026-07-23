@@ -22,6 +22,8 @@ from pathlib import Path
 import pytz
 from dotenv import load_dotenv
 
+from outlook_client import OutlookClient, OutlookAuthRequired
+
 # Load .env from the same directory as this script
 _HERE = Path(__file__).parent
 load_dotenv(_HERE / ".env")
@@ -98,17 +100,31 @@ def build_gmail_client(cfg: dict):
         return None
 
 
-def build_outlook_client(cfg: dict):
-    """Authenticate Outlook via MSAL and return an OutlookClient, or None on failure."""
+def build_outlook_client(cfg: dict, allow_interactive: bool = False):
+    """Authenticate Outlook via MSAL and return an OutlookClient, or None on failure.
+
+    allow_interactive must only be True for the explicit `--auth` command a
+    human runs themselves at a terminal. The scheduled/unattended path (plain
+    `python agent.py`, as launchd runs it) must never be able to fall through
+    to the interactive device-code prompt -- there's nobody there to complete
+    it, so it would just hang overnight instead of failing loudly.
+    """
     try:
-        from outlook_client import OutlookClient
         client = OutlookClient(
             client_id=cfg["azure_client_id"],
             tenant_id=cfg["azure_tenant_id"],
             token_cache_path=cfg["msal_token_cache_path"],
+            allow_interactive=allow_interactive,
         )
         logger.info("Outlook client ready")
         return client
+    except OutlookAuthRequired as exc:
+        logger.error(
+            "Outlook needs interactive re-consent and this run can't provide it "
+            "-- skipping Outlook for now (Gmail continues normally). Fix by "
+            "running `python agent.py --auth` yourself: %s", exc,
+        )
+        return None
     except Exception as exc:
         logger.error("Outlook auth failed: %s", exc)
         return None
@@ -135,7 +151,6 @@ def run(dry_run: bool = False):
     logger.info("Fetching recent emails (last 24 h)…")
 
     from gmail_client import GmailClient
-    from outlook_client import OutlookClient
 
     gmail_raw = gmail.get_recent_emails(since_days=1) if gmail else []
     outlook_raw = outlook.get_recent_emails(since_days=1) if outlook else []
@@ -314,7 +329,7 @@ if __name__ == "__main__":
         cfg = load_config()
         logger.info("Auth-only mode — testing connections…")
         gmail = build_gmail_client(cfg)
-        outlook = build_outlook_client(cfg)
+        outlook = build_outlook_client(cfg, allow_interactive=True)
         if gmail:
             logger.info("Gmail: OK")
         if outlook:

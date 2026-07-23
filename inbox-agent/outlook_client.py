@@ -19,16 +19,31 @@ logger = logging.getLogger(__name__)
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 # offline_access is required to get a refresh token so the cache stays valid.
-# Calendars.Read added for the morning briefing's "Today's Calendar" section --
-# a token cached before this was added won't have consent for it (Graph calls
-# will fail with a permission error until Eddie re-runs `python agent.py --auth`).
-SCOPES = [
+# CORE_SCOPES are the mail scopes every cached token so far has consent for.
+# Calendars.Read was added later for the morning briefing's "Today's Calendar"
+# section -- a token cached before that won't have consent for it, and MSAL's
+# acquire_token_silent() can't silently satisfy a scope the account never
+# granted. _authenticate() tries the full scope set first, then falls back to
+# CORE_SCOPES alone so mail keeps working via the existing consent even when
+# a newer scope needs a fresh interactive grant (see OutlookAuthRequired).
+CORE_SCOPES = [
     "Mail.Read",
     "Mail.ReadWrite",
     "Mail.Send",
     "User.Read",
-    "Calendars.Read",
 ]
+SCOPES = CORE_SCOPES + ["Calendars.Read"]
+
+
+class OutlookAuthRequired(Exception):
+    """Raised when no cached token can satisfy any known scope set silently
+    and interactive auth isn't allowed in this context.
+
+    Callers running unattended (cron/launchd) should catch this and skip
+    Outlook for the run rather than let MSAL fall through to a device-code
+    prompt that has nobody to complete it. Only the explicit, human-run
+    `python agent.py --auth` command should pass allow_interactive=True.
+    """
 
 
 class OutlookClient:
@@ -37,10 +52,12 @@ class OutlookClient:
         client_id: str,
         tenant_id: str,
         token_cache_path: str = "msal_token_cache.json",
+        allow_interactive: bool = False,
     ):
         self.client_id = client_id
         self.tenant_id = tenant_id
         self.token_cache_path = token_cache_path
+        self.allow_interactive = allow_interactive
         self._access_token: Optional[str] = None
         self._folder_cache: Dict[str, str] = {}  # display_name → id
         self._authenticate()
@@ -48,7 +65,13 @@ class OutlookClient:
     # ─── Auth ────────────────────────────────────────────────────────────────
 
     def _authenticate(self):
-        """Authenticate via MSAL. On first run, prints device-code instructions."""
+        """Authenticate via MSAL.
+
+        Tries silent auth with the full scope set, then with just the core
+        mail scopes, before ever considering the interactive device-code
+        flow -- and the device-code flow only runs at all when
+        self.allow_interactive is True (see OutlookAuthRequired's docstring).
+        """
         cache = msal.SerializableTokenCache()
         if os.path.exists(self.token_cache_path):
             with open(self.token_cache_path) as fh:
@@ -65,9 +88,30 @@ class OutlookClient:
         if accounts:
             result = app.acquire_token_silent(SCOPES, account=accounts[0])
             if result:
-                logger.info("Outlook: silent token refresh succeeded")
+                logger.info("Outlook: silent token refresh succeeded (full scope)")
+            else:
+                logger.warning(
+                    "Outlook: silent refresh with full scope set failed (likely "
+                    "missing consent for a newer scope, e.g. Calendars.Read) -- "
+                    "retrying with core mail scopes only"
+                )
+                result = app.acquire_token_silent(CORE_SCOPES, account=accounts[0])
+                if result:
+                    logger.info(
+                        "Outlook: silent token refresh succeeded (core mail scopes "
+                        "only -- calendar access unavailable until "
+                        "`python agent.py --auth` is re-run interactively)"
+                    )
 
         if not result:
+            if not self.allow_interactive:
+                raise OutlookAuthRequired(
+                    "No cached Outlook token could be silently refreshed for any "
+                    "known scope set, and interactive auth is not allowed in this "
+                    "context. Run `python agent.py --auth` interactively to "
+                    "(re-)consent."
+                )
+
             logger.info("Outlook: no cached token — starting device code flow")
             flow = app.initiate_device_flow(scopes=SCOPES)
             if "user_code" not in flow:
