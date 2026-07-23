@@ -18,6 +18,14 @@ logger = logging.getLogger(__name__)
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
+# Outlook has no Gmail-style category labels, so an obvious no-reply/
+# notifications sender is the only cheap signal that a message never
+# warranted a reply in the first place. Mirrors gmail_client's
+# _AUTOMATED_SENDER_MARKERS.
+_AUTOMATED_SENDER_MARKERS = (
+    "no-reply@", "noreply@", "donotreply@", "do-not-reply@", "notifications@",
+)
+
 # offline_access is required to get a refresh token so the cache stays valid.
 # CORE_SCOPES are the mail scopes every cached token so far has consent for.
 # Calendars.Read was added later for the morning briefing's "Today's Calendar"
@@ -323,18 +331,34 @@ class OutlookClient:
             "is_all_day": event.get("isAllDay", False),
         }
 
-    def has_replied(self, conversation_id: str, received_at: str) -> Optional[bool]:
+    def has_replied(self, conversation_id: str, received_at: str, sender: str = "") -> Optional[bool]:
         """Whether a Sent Items message exists in this conversation after received_at.
 
         received_at should be a Graph datetime string (e.g. receivedDateTime) --
         sentDateTime and receivedDateTime are both UTC 'Z' timestamps from Graph,
         so a plain string comparison is sufficient without parsing.
 
-        True/False when known; None if conversation_id is missing or the lookup
-        fails. Queries only Sent Items filtered by conversationId ($top=1) --
-        cheap, not a full conversation or mailbox scan.
+        sender, if given, is the incoming message's From address. Obvious no-
+        reply/notifications senders never warrant a reply, so those return
+        None immediately without even hitting Graph (Outlook has no Gmail-
+        style category labels to check instead).
+
+        True/False when known; None if conversation_id is missing, the sender
+        looks automated, or the lookup fails. Queries only Sent Items filtered
+        by conversationId -- cheap, not a full conversation or mailbox scan.
+
+        Deliberately has no $orderby: Graph rejects $filter=conversationId
+        combined with $orderby on a different property with a 400
+        "InefficientFilter" ("restriction or sort order is too complex"), which
+        previously made every single Outlook has_replied() call fail closed
+        (silently returning None -> treated as "not awaiting reply" for every
+        message, every run). Instead this fetches an unordered page and checks
+        client-side whether *any* sent item postdates received_at.
         """
         if not conversation_id:
+            return None
+
+        if sender and any(marker in sender.lower() for marker in _AUTOMATED_SENDER_MARKERS):
             return None
 
         result = self._get(
@@ -342,17 +366,21 @@ class OutlookClient:
             params={
                 "$filter": f"conversationId eq '{conversation_id}'",
                 "$select": "id,sentDateTime",
-                "$orderby": "sentDateTime desc",
-                "$top": 1,
+                "$top": 25,
             },
         )
         if result is None:
+            logger.warning(
+                "Outlook has_replied lookup failed for conversation %s -- "
+                "treating as unknown, not as 'not replied' (see Graph GET error above)",
+                conversation_id,
+            )
             return None
 
         sent_items = result.get("value", [])
         if not sent_items:
             return False
-        return sent_items[0].get("sentDateTime", "") > received_at
+        return any(item.get("sentDateTime", "") > received_at for item in sent_items)
 
     # ─── Actions ─────────────────────────────────────────────────────────────
 

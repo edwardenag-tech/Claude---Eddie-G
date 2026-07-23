@@ -178,7 +178,9 @@ def run(dry_run: bool = False):
         awaiting = False
         try:
             if outlook:
-                awaiting = outlook.has_replied(email["conversation_id"], email["date"]) is False
+                awaiting = outlook.has_replied(
+                    email["conversation_id"], email["date"], email.get("from", "")
+                ) is False
         except Exception as exc:
             logger.warning("Reply-check failed for Outlook message %s: %s", email.get("id"), exc)
         email["awaiting_reply"] = awaiting

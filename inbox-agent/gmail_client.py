@@ -25,6 +25,20 @@ SCOPES = [
     "https://www.googleapis.com/auth/documents.readonly",
 ]
 
+# Gmail's own ML categorisation for bulk/automated mail. A message carrying
+# any of these never warrants a reply, so has_replied() shouldn't bother
+# checking for one (empirically, ~100% of promo/notification threads are
+# single-message with no SENT follow-up, which made every one of them look
+# "awaiting reply").
+_AUTOMATED_CATEGORIES = {
+    "CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES", "CATEGORY_FORUMS",
+}
+# Belt-and-suspenders for automated senders that land in the primary category
+# without a CATEGORY_* label.
+_AUTOMATED_SENDER_MARKERS = (
+    "no-reply@", "noreply@", "donotreply@", "do-not-reply@", "notifications@",
+)
+
 
 class GmailClient:
     def __init__(self, credentials_path: str, token_path: str = "gmail_token.json"):
@@ -104,16 +118,19 @@ class GmailClient:
     def has_replied(self, thread_id: str, message_id: str) -> Optional[bool]:
         """Whether this account has sent a message in the thread after message_id.
 
-        True/False when known; None if the lookup fails or message_id can't be
-        found in the thread (callers should treat None as "don't know" rather
-        than "not replied"). Uses threads().get(format='metadata') -- cheap,
-        no message bodies -- rather than scanning the mailbox.
+        True/False when known; None if the lookup fails, message_id can't be
+        found in the thread, or the message never warranted a reply in the
+        first place (Gmail-categorised promo/social/updates/forums mail, or
+        an obvious no-reply/notifications sender) -- callers should treat
+        None as "don't know / not applicable" rather than "not replied".
+        Uses threads().get(format='metadata') -- cheap, no message bodies --
+        rather than scanning the mailbox.
         """
         try:
             thread = (
                 self.service.users()
                 .threads()
-                .get(userId="me", id=thread_id, format="metadata")
+                .get(userId="me", id=thread_id, format="metadata", metadataHeaders=["From"])
                 .execute()
             )
         except HttpError as exc:
@@ -123,6 +140,17 @@ class GmailClient:
         messages = thread.get("messages", [])
         incoming = next((m for m in messages if m.get("id") == message_id), None)
         if incoming is None:
+            return None
+
+        incoming_labels = set(incoming.get("labelIds", []))
+        if incoming_labels & _AUTOMATED_CATEGORIES:
+            return None
+
+        from_header = next(
+            (h["value"] for h in incoming.get("payload", {}).get("headers", []) if h["name"].lower() == "from"),
+            "",
+        ).lower()
+        if any(marker in from_header for marker in _AUTOMATED_SENDER_MARKERS):
             return None
 
         incoming_date = int(incoming.get("internalDate", 0))
