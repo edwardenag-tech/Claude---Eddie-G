@@ -4,6 +4,7 @@
 # OAuth token caches (auto-generated, contain live tokens)
 gmail_token.json
 msal_token_cache.json
+gmail_credentials.json
 
 # Python
 __pycache__/
