@@ -66,6 +66,8 @@ def load_config() -> dict:
         "gmail_token_path":       str(_HERE / os.environ.get("GMAIL_TOKEN_PATH", "gmail_token.json")),
         "msal_token_cache_path":  str(_HERE / os.environ.get("MSAL_TOKEN_CACHE_PATH", "msal_token_cache.json")),
         "campaign_doc_id":        os.environ.get("CAMPAIGN_DOC_ID", "12gKTGiqwqgEc5iBnypfKFP79bEKThc1ltBOnIvC8Mrk"),
+        "icloud_apple_id":        os.environ.get("ICLOUD_APPLE_ID", ""),
+        "icloud_app_password":    os.environ.get("ICLOUD_APP_PASSWORD", ""),
     }
 
     if not cfg["anthropic_api_key"]:
@@ -130,6 +132,25 @@ def build_outlook_client(cfg: dict, allow_interactive: bool = False):
         return None
 
 
+def build_icloud_client(cfg: dict):
+    """Connect to iCloud CalDAV and return an ICloudCalendarClient, or None on failure."""
+    if not cfg["icloud_apple_id"] or not cfg["icloud_app_password"]:
+        logger.info("ICLOUD_APPLE_ID / ICLOUD_APP_PASSWORD not set — skipping iCloud calendar")
+        return None
+
+    try:
+        from icloud_calendar_client import ICloudCalendarClient
+        client = ICloudCalendarClient(
+            apple_id=cfg["icloud_apple_id"],
+            app_password=cfg["icloud_app_password"],
+        )
+        logger.info("iCloud calendar client ready")
+        return client
+    except Exception as exc:
+        logger.error("iCloud calendar auth failed: %s", exc)
+        return None
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def run(dry_run: bool = False):
@@ -142,6 +163,7 @@ def run(dry_run: bool = False):
     # ── Authenticate ──────────────────────────────────────────────────────────
     gmail = build_gmail_client(cfg)
     outlook = build_outlook_client(cfg)
+    icloud = build_icloud_client(cfg)
 
     if not gmail and not outlook:
         logger.error("No email clients available — cannot continue.")
@@ -250,18 +272,30 @@ def run(dry_run: bool = False):
             "Please check your inboxes manually."
         )
 
-    # ── Fetch today's calendar ────────────────────────────────────────────────
+    # ── Fetch today's calendar (work + personal, independent failure modes) ───
     calendar_events = None
     try:
         if outlook:
-            logger.info("Fetching today's calendar events…")
+            logger.info("Fetching today's Outlook (work) calendar events…")
             calendar_events = outlook.get_todays_events()
-            logger.info("Calendar: %d event(s) today", len(calendar_events))
+            logger.info("Work calendar: %d event(s) today", len(calendar_events))
         else:
-            logger.info("Outlook not connected — skipping calendar")
+            logger.info("Outlook not connected — skipping work calendar")
     except Exception as exc:
-        logger.error("Calendar fetch failed (continuing): %s", exc)
+        logger.error("Work calendar fetch failed (continuing): %s", exc)
         calendar_events = None
+
+    icloud_calendar_events = None
+    try:
+        if icloud:
+            logger.info("Fetching today's iCloud (personal) calendar events…")
+            icloud_calendar_events = icloud.get_todays_events()
+            logger.info("Personal calendar: %d event(s) today", len(icloud_calendar_events))
+        else:
+            logger.info("iCloud not connected — skipping personal calendar")
+    except Exception as exc:
+        logger.error("Personal calendar fetch failed (continuing): %s", exc)
+        icloud_calendar_events = None
 
     # ── Fetch campaign highlights ─────────────────────────────────────────────
     campaign_highlights = []
@@ -288,6 +322,8 @@ def run(dry_run: bool = False):
     if dry_run:
         logger.info("[DRY RUN] Skipping briefing send. To-do list preview:")
         print("\n" + todo_list + "\n")
+        print(f"[DRY RUN] Work calendar (Outlook): {calendar_events}")
+        print(f"[DRY RUN] Personal calendar (iCloud): {icloud_calendar_events}")
     else:
         logger.info("Sending morning briefing to %s…", cfg["notify_emails"])
         from briefing import send_briefing
@@ -300,6 +336,7 @@ def run(dry_run: bool = False):
             cleaning_report=cleaning_report,
             notify_emails=cfg["notify_emails"],
             calendar_events=calendar_events,
+            icloud_calendar_events=icloud_calendar_events,
             campaign_highlights=campaign_highlights,
         )
         if success:
@@ -332,10 +369,13 @@ if __name__ == "__main__":
         logger.info("Auth-only mode — testing connections…")
         gmail = build_gmail_client(cfg)
         outlook = build_outlook_client(cfg, allow_interactive=True)
+        icloud = build_icloud_client(cfg)
         if gmail:
             logger.info("Gmail: OK")
         if outlook:
             logger.info("Outlook: OK")
+        if icloud:
+            logger.info("iCloud: OK")
         logger.info("Auth complete.")
     else:
         run(dry_run=args.dry_run)

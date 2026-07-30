@@ -7,3 +7,4 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 pytz>=2023.3
 markdown>=3.5.0
+caldav>=2.0.0

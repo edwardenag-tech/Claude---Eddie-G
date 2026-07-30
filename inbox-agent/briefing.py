@@ -67,25 +67,54 @@ def _format_event_time(dt_str: str) -> str:
     return f"{hour12}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
 
 
-def _calendar_section(events: Optional[List[Dict]]) -> str:
-    """Render today's Outlook calendar events.
+def _source_badge(label: str, color: str) -> str:
+    return (
+        f'<span style="display:inline-block;background:{color};color:#fff;'
+        f'border-radius:4px;padding:1px 7px;font-size:10px;font-weight:600;'
+        f'text-transform:uppercase;letter-spacing:.03em;vertical-align:middle;">{label}</span>'
+    )
 
-    events is None when the calendar fetch failed or wasn't attempted (e.g.
-    the Calendars.Read scope hasn't been consented yet) -- shown as a
-    friendly note rather than an empty table so it reads differently from
-    "no meetings today".
+
+def _calendar_section(
+    outlook_events: Optional[List[Dict]],
+    icloud_events: Optional[List[Dict]] = None,
+) -> str:
+    """Render today's calendar as one merged, chronological view spanning
+    both the Outlook work calendar and the iCloud personal calendar.
+
+    Each source's events list is None when that source's fetch failed or
+    wasn't attempted (e.g. Outlook needs Calendars.Read re-consent, or iCloud
+    credentials aren't configured / auth failed) -- each is reported with its
+    own friendly note, independently of the other, so one source going down
+    never hides events from the source that's still working.
     """
-    if events is None:
-        return (
-            '<p style="color:#6b7280;font-style:italic;">'
-            "Calendar not connected yet — Outlook needs to re-consent to the "
-            "Calendars.Read scope (run <code>python agent.py --auth</code>).</p>"
+    notes = []
+    if outlook_events is None:
+        notes.append(
+            "Work calendar (Outlook) not connected — needs to re-consent to the "
+            "Calendars.Read scope (run <code>python agent.py --auth</code>)."
         )
-    if not events:
-        return '<p style="color:#6b7280;font-style:italic;">No events scheduled today.</p>'
+    if icloud_events is None:
+        notes.append(
+            "Personal calendar (iCloud) not connected — check ICLOUD_APPLE_ID / "
+            "ICLOUD_APP_PASSWORD in .env."
+        )
+    notes_html = "".join(
+        f'<p style="color:#6b7280;font-style:italic;margin:0 0 8px 0;">{n}</p>' for n in notes
+    )
+
+    merged = [(e, "Work", "#1d4ed8") for e in (outlook_events or [])]
+    merged += [(e, "Personal", "#059669") for e in (icloud_events or [])]
+
+    if not merged:
+        if outlook_events is None and icloud_events is None:
+            return notes_html
+        return notes_html + '<p style="color:#6b7280;font-style:italic;">No events scheduled today.</p>'
+
+    merged.sort(key=lambda item: item[0].get("start", ""))
 
     rows = []
-    for e in events:
+    for e, label, color in merged:
         if e.get("is_all_day"):
             time_str = "All day"
         else:
@@ -95,16 +124,18 @@ def _calendar_section(events: Optional[List[Dict]]) -> str:
         rows.append(
             '<tr>'
             f'<td style="padding:5px 14px 5px 0;color:#6b7280;white-space:nowrap;font-size:12px;">{time_str}</td>'
+            f'<td style="padding:5px 10px 5px 0;white-space:nowrap;">{_source_badge(label, color)}</td>'
             '<td style="padding:5px 0;">'
             f'<div style="font-weight:600;">{e.get("subject", "(no subject)")}</div>'
             + (f'<div style="font-size:12px;color:#6b7280;">{meta}</div>' if meta else "")
             + '</td></tr>'
         )
 
-    return (
+    table = (
         '<table style="width:100%;border-collapse:collapse;font-size:13px;">'
         f'<tbody>{"".join(rows)}</tbody></table>'
     )
+    return notes_html + table
 
 
 def _campaign_highlights_section(highlights: List[Dict]) -> str:
@@ -214,6 +245,7 @@ def build_briefing_html(
     cleaning_report: Dict,
     date_str: str,
     calendar_events: Optional[List[Dict]] = None,
+    icloud_calendar_events: Optional[List[Dict]] = None,
     campaign_highlights: Optional[List[Dict]] = None,
 ) -> str:
     """Assemble the full HTML briefing email."""
@@ -278,7 +310,7 @@ def build_briefing_html(
   <!-- Section 1: Today's Calendar -->
   <div style="{section_style}">
     <h2 style="{h2_style}">1 · Today's Calendar</h2>
-    {_calendar_section(calendar_events)}
+    {_calendar_section(calendar_events, icloud_calendar_events)}
   </div>
 
   <!-- Section 2: To-Do -->
@@ -340,6 +372,7 @@ def send_briefing(
     cleaning_report: Dict,
     notify_emails: List[str],
     calendar_events: Optional[List[Dict]] = None,
+    icloud_calendar_events: Optional[List[Dict]] = None,
     campaign_highlights: Optional[List[Dict]] = None,
 ) -> bool:
     """
@@ -357,6 +390,7 @@ def send_briefing(
         cleaning_report=cleaning_report,
         date_str=date_str,
         calendar_events=calendar_events,
+        icloud_calendar_events=icloud_calendar_events,
         campaign_highlights=campaign_highlights,
     )
 
