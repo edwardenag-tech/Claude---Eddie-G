@@ -22,6 +22,7 @@ from pathlib import Path
 import pytz
 from dotenv import load_dotenv
 
+from gmail_client import GmailClient, GmailAuthRequired
 from outlook_client import OutlookClient, OutlookAuthRequired
 
 # Load .env from the same directory as this script
@@ -78,8 +79,12 @@ def load_config() -> dict:
 
 # ─── Auth helpers ─────────────────────────────────────────────────────────────
 
-def build_gmail_client(cfg: dict):
-    """Authenticate Gmail and return a GmailClient, or None on failure."""
+def build_gmail_client(cfg: dict, allow_interactive: bool = False):
+    """Authenticate Gmail and return a GmailClient, or None on failure.
+
+    allow_interactive must only be True for the explicit `--auth` command a
+    human runs themselves at a terminal -- same rule as Outlook's flag.
+    """
     creds_path = cfg["gmail_credentials_path"]
     if not os.path.exists(creds_path):
         logger.warning(
@@ -90,13 +95,20 @@ def build_gmail_client(cfg: dict):
         return None
 
     try:
-        from gmail_client import GmailClient
         client = GmailClient(
             credentials_path=creds_path,
             token_path=cfg["gmail_token_path"],
+            allow_interactive=allow_interactive,
         )
         logger.info("Gmail client ready")
         return client
+    except GmailAuthRequired as exc:
+        logger.error(
+            "Gmail needs interactive re-consent and this run can't provide it "
+            "-- skipping Gmail for now. Fix by running `python agent.py --auth` "
+            "yourself: %s", exc,
+        )
+        return None
     except Exception as exc:
         logger.error("Gmail auth failed: %s", exc)
         return None
@@ -171,8 +183,6 @@ def run(dry_run: bool = False):
 
     # ── Fetch recent emails (for briefing) ────────────────────────────────────
     logger.info("Fetching recent emails (last 24 h)…")
-
-    from gmail_client import GmailClient
 
     gmail_raw = gmail.get_recent_emails(since_days=1) if gmail else []
     outlook_raw = outlook.get_recent_emails(since_days=1) if outlook else []
@@ -367,7 +377,7 @@ if __name__ == "__main__":
     if args.auth:
         cfg = load_config()
         logger.info("Auth-only mode — testing connections…")
-        gmail = build_gmail_client(cfg)
+        gmail = build_gmail_client(cfg, allow_interactive=True)
         outlook = build_outlook_client(cfg, allow_interactive=True)
         icloud = build_icloud_client(cfg)
         if gmail:

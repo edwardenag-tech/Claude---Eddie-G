@@ -8,6 +8,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Optional, Dict
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -15,6 +16,17 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
+
+
+class GmailAuthRequired(Exception):
+    """Raised when the cached token can't be silently refreshed (expired or
+    revoked refresh token) and interactive auth isn't allowed in this context.
+
+    Callers running unattended (cron/launchd) should catch this and skip
+    Gmail for the run rather than let the OAuth flow try to open a browser
+    that has nobody to complete it. Only the explicit, human-run
+    `python agent.py --auth` command should pass allow_interactive=True.
+    """
 
 # Minimum scopes needed: read, modify (archive/label), and send.
 SCOPES = [
@@ -41,9 +53,15 @@ _AUTOMATED_SENDER_MARKERS = (
 
 
 class GmailClient:
-    def __init__(self, credentials_path: str, token_path: str = "gmail_token.json"):
+    def __init__(
+        self,
+        credentials_path: str,
+        token_path: str = "gmail_token.json",
+        allow_interactive: bool = False,
+    ):
         self.credentials_path = credentials_path
         self.token_path = token_path
+        self.allow_interactive = allow_interactive
         self.service = None
         self._label_cache: Dict[str, str] = {}  # name → id
         self._authenticate()
@@ -51,16 +69,43 @@ class GmailClient:
     # ─── Auth ────────────────────────────────────────────────────────────────
 
     def _authenticate(self):
-        """Run OAuth2 flow on first call; refresh silently on subsequent calls."""
+        """Run OAuth2 flow on first call; refresh silently on subsequent calls.
+
+        A refresh token can die (expired or revoked, e.g. the 7-day expiry
+        Google applies to OAuth consent screens still in "Testing" mode) even
+        though a cached token file exists. That must not silently propagate
+        as a raw RefreshError -- it needs to fall back to the interactive
+        flow, but only when self.allow_interactive is True (see
+        GmailAuthRequired's docstring), so an unattended run degrades
+        gracefully instead of hanging on a browser prompt nobody can answer.
+        """
         creds = None
+        need_interactive = False
 
         if os.path.exists(self.token_path):
             creds = Credentials.from_authorized_user_file(self.token_path, SCOPES)
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
+                try:
+                    creds.refresh(Request())
+                except RefreshError as exc:
+                    logger.warning(
+                        "Gmail: cached refresh token is dead (%s) -- needs "
+                        "interactive re-consent", exc,
+                    )
+                    creds = None
+                    need_interactive = True
             else:
+                need_interactive = True
+
+            if need_interactive:
+                if not self.allow_interactive:
+                    raise GmailAuthRequired(
+                        "No cached Gmail token could be silently refreshed, and "
+                        "interactive auth is not allowed in this context. Run "
+                        "`python agent.py --auth` interactively to (re-)consent."
+                    )
                 if not os.path.exists(self.credentials_path):
                     raise FileNotFoundError(
                         f"Gmail credentials not found at '{self.credentials_path}'. "
@@ -217,6 +262,28 @@ class GmailClient:
         except HttpError as exc:
             logger.error("Gmail send failed: %s", exc)
             return False
+
+    def create_draft(self, to: List[str], subject: str, body_html: str, body_text: str = "") -> Optional[str]:
+        """Create a Gmail draft (not sent). Returns the draft ID, or None on failure."""
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["to"] = ", ".join(to)
+            msg["subject"] = subject
+
+            if body_text:
+                msg.attach(MIMEText(body_text, "plain"))
+            msg.attach(MIMEText(body_html, "html"))
+
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+            draft = self.service.users().drafts().create(
+                userId="me", body={"message": {"raw": raw}}
+            ).execute()
+            draft_id = draft.get("id")
+            logger.info("Gmail: draft created (id=%s) to %s | subject: %s", draft_id, to, subject)
+            return draft_id
+        except HttpError as exc:
+            logger.error("Gmail draft creation failed: %s", exc)
+            return None
 
     # ─── Labels ──────────────────────────────────────────────────────────────
 
