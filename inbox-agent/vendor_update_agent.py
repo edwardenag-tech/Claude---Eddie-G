@@ -26,8 +26,9 @@ from typing import Dict, List, Optional, Tuple
 
 import anthropic
 from dotenv import load_dotenv
+from google.auth.exceptions import RefreshError
 
-from gmail_client import GmailClient
+from gmail_client import GmailClient, GmailAuthRequired
 from outlook_client import OutlookClient
 from docs_client import DocsClient
 from campaign_doc_parser import parse_active_campaigns
@@ -456,11 +457,37 @@ def main() -> None:
         token_cache_path=msal_cache,
     )
 
+    # Gmail is optional -- an unattended run (this is a launchd job, nobody is
+    # at a keyboard to complete an OAuth consent screen) must not crash just
+    # because the cached refresh token died. Same rule as agent.py's
+    # build_gmail_client: degrade to Outlook-only drafts rather than raise.
     logger.info("Connecting to Gmail...")
-    gmail = GmailClient(credentials_path=gmail_creds, token_path=gmail_token)
+    try:
+        gmail = GmailClient(credentials_path=gmail_creds, token_path=gmail_token)
+    except GmailAuthRequired as exc:
+        logger.error(
+            "Gmail needs interactive re-consent and this unattended run can't "
+            "provide it -- Gmail drafts will be skipped this run (Outlook "
+            "drafts still get created). Fix by running `python agent.py "
+            "--auth` yourself: %s", exc,
+        )
+        gmail = None
 
+    # Google Docs shares the same OAuth token/credentials as Gmail, so it dies
+    # the same way and needs the same guard. Unlike Gmail this one isn't
+    # optional -- the campaign doc is the only source of what to draft -- but
+    # a clean logged exit beats an unhandled traceback either way.
     logger.info("Connecting to Google Docs (live campaign source)...")
-    docs = DocsClient(credentials_path=gmail_creds, token_path=gmail_token)
+    try:
+        docs = DocsClient(credentials_path=gmail_creds, token_path=gmail_token)
+    except RefreshError as exc:
+        logger.error(
+            "Google Docs needs interactive re-consent (shares Gmail's OAuth "
+            "token) and this unattended run can't provide it -- cannot load "
+            "the live campaign doc, so there is nothing to draft this run. "
+            "Fix by running `python agent.py --auth` yourself: %s", exc,
+        )
+        sys.exit(1)
 
     ai = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -514,8 +541,12 @@ def main() -> None:
         outlook_id = outlook_create_new_draft(outlook, landlord_email, subject, html_body)
 
         # 5. Save to Gmail Drafts — if no real email found, park draft in Eddie's own inbox
-        gmail_to = landlord_email if "@" in landlord_email and "[" not in landlord_email else user_gmail
-        gmail_id = gmail_create_new_draft(gmail, gmail_to, subject, html_body, plain_body)
+        # (skipped entirely if Gmail auth is down this run -- see connect step above)
+        if gmail is not None:
+            gmail_to = landlord_email if "@" in landlord_email and "[" not in landlord_email else user_gmail
+            gmail_id = gmail_create_new_draft(gmail, gmail_to, subject, html_body, plain_body)
+        else:
+            gmail_id = None
 
         if outlook_id or gmail_id:
             drafted += 1
