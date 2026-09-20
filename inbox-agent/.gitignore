@@ -12,3 +12,6 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+
+# Run logs (contain email subjects)
+logs/

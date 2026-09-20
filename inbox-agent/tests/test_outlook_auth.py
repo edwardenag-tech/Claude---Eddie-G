@@ -21,7 +21,7 @@ ACCOUNT = {"username": "edward@ibproperty.com.au"}
 def _mock_app(accounts, silent_results, device_flow_init=None, device_flow_result=None):
     app = MagicMock()
     app.get_accounts.return_value = accounts
-    app.acquire_token_silent.side_effect = silent_results
+    app.acquire_token_silent_with_error.side_effect = silent_results
     if device_flow_init is not None:
         app.initiate_device_flow.return_value = device_flow_init
     if device_flow_result is not None:
@@ -42,7 +42,7 @@ class TestSilentAuthScopeSplit(unittest.TestCase):
         )
 
         self.assertEqual(client._access_token, "FULL_TOKEN")
-        app.acquire_token_silent.assert_called_once_with(SCOPES, account=ACCOUNT)
+        app.acquire_token_silent_with_error.assert_called_once_with(SCOPES, account=ACCOUNT)
         app.initiate_device_flow.assert_not_called()
 
     @patch("outlook_client.msal")
@@ -62,8 +62,8 @@ class TestSilentAuthScopeSplit(unittest.TestCase):
         )
 
         self.assertEqual(client._access_token, "CORE_TOKEN")
-        self.assertEqual(app.acquire_token_silent.call_count, 2)
-        first_call, second_call = app.acquire_token_silent.call_args_list
+        self.assertEqual(app.acquire_token_silent_with_error.call_count, 2)
+        first_call, second_call = app.acquire_token_silent_with_error.call_args_list
         self.assertEqual(first_call.args[0], SCOPES)
         self.assertEqual(second_call.args[0], CORE_SCOPES)
         app.initiate_device_flow.assert_not_called()
@@ -98,7 +98,7 @@ class TestSilentAuthScopeSplit(unittest.TestCase):
                 "cid", "tid", token_cache_path="/nonexistent/cache.json", allow_interactive=False
             )
 
-        app.acquire_token_silent.assert_not_called()
+        app.acquire_token_silent_with_error.assert_not_called()
         app.initiate_device_flow.assert_not_called()
 
     @patch("outlook_client.msal")
@@ -152,6 +152,32 @@ class TestSilentAuthScopeSplit(unittest.TestCase):
             OutlookClient("cid", "tid", token_cache_path=cache_path, allow_interactive=False)
             with open(cache_path) as fh:
                 self.assertEqual(fh.read(), '{"fake":"cache"}')
+
+
+class TestSilentFailureReasonIsSurfaced(unittest.TestCase):
+    """A rejected refresh (e.g. AADSTS50078, tenant-policy MFA expiry) must be
+    reported as such, not as a vague 'missing consent' warning."""
+
+    MFA_ERROR = {
+        "error": "invalid_grant",
+        "error_description": "AADSTS50078: Presented multi-factor authentication has expired\nTrace ID: x",
+    }
+
+    @patch("outlook_client.msal")
+    def test_error_response_is_treated_as_failure_and_reason_reaches_exception(self, mock_msal):
+        cache = MagicMock()
+        mock_msal.SerializableTokenCache.return_value = cache
+        app = _mock_app(accounts=[ACCOUNT], silent_results=[self.MFA_ERROR, self.MFA_ERROR])
+        mock_msal.PublicClientApplication.return_value = app
+
+        with self.assertLogs("outlook_client", level="WARNING") as logs:
+            with self.assertRaises(OutlookAuthRequired) as ctx:
+                OutlookClient("cid", "tid", token_cache_path="/nonexistent/cache.json")
+
+        self.assertIn("AADSTS50078", str(ctx.exception))
+        self.assertNotIn("Trace ID", str(ctx.exception))  # only the first line
+        self.assertTrue(any("AADSTS50078" in line for line in logs.output))
+        self.assertFalse(any("missing consent" in line for line in logs.output))
 
 
 if __name__ == "__main__":

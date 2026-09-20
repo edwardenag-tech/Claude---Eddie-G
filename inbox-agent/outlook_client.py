@@ -72,6 +72,28 @@ class OutlookClient:
 
     # ─── Auth ────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _acquire_silent(app, scopes, account):
+        """Silent token acquisition that keeps MSAL's failure reason.
+
+        acquire_token_silent() collapses every failure to None, which is how a
+        tenant-policy MFA expiry (AADSTS50078) got logged for weeks as a
+        misleading "missing consent" warning. Returns (result, error): result
+        is the token response or None; error is MSAL's error dict when the
+        refresh was rejected (None when there was simply nothing cached).
+        """
+        response = app.acquire_token_silent_with_error(scopes, account=account)
+        if response and "error" in response:
+            return None, response
+        return response, None
+
+    @staticmethod
+    def _describe_error(error: Optional[Dict]) -> str:
+        if not error:
+            return "unknown"
+        description = (error.get("error_description") or "").split("\n")[0][:300]
+        return f"{error.get('error', 'error')}: {description}" if description else str(error.get("error", "error"))
+
     def _authenticate(self):
         """Authenticate via MSAL.
 
@@ -92,18 +114,26 @@ class OutlookClient:
         )
 
         result = None
+        last_error = None  # MSAL's error dict from the last failed silent attempt
         accounts = app.get_accounts()
         if accounts:
-            result = app.acquire_token_silent(SCOPES, account=accounts[0])
+            result, last_error = self._acquire_silent(app, SCOPES, accounts[0])
             if result:
                 logger.info("Outlook: silent token refresh succeeded (full scope)")
             else:
-                logger.warning(
-                    "Outlook: silent refresh with full scope set failed (likely "
-                    "missing consent for a newer scope, e.g. Calendars.Read) -- "
-                    "retrying with core mail scopes only"
-                )
-                result = app.acquire_token_silent(CORE_SCOPES, account=accounts[0])
+                if last_error:
+                    logger.warning(
+                        "Outlook: silent refresh with full scope set failed (%s) "
+                        "-- retrying with core mail scopes only",
+                        self._describe_error(last_error),
+                    )
+                else:
+                    logger.warning(
+                        "Outlook: silent refresh with full scope set failed (no cached "
+                        "token for it -- likely missing consent for a newer scope, e.g. "
+                        "Calendars.Read) -- retrying with core mail scopes only"
+                    )
+                result, last_error = self._acquire_silent(app, CORE_SCOPES, accounts[0])
                 if result:
                     logger.info(
                         "Outlook: silent token refresh succeeded (core mail scopes "
@@ -113,10 +143,11 @@ class OutlookClient:
 
         if not result:
             if not self.allow_interactive:
+                reason = f" Microsoft said: {self._describe_error(last_error)}." if last_error else ""
                 raise OutlookAuthRequired(
                     "No cached Outlook token could be silently refreshed for any "
                     "known scope set, and interactive auth is not allowed in this "
-                    "context. Run `python agent.py --auth` interactively to "
+                    f"context.{reason} Run `python agent.py --auth` interactively to "
                     "(re-)consent."
                 )
 

@@ -181,6 +181,19 @@ def run(dry_run: bool = False):
         logger.error("No email clients available — cannot continue.")
         sys.exit(1)
 
+    # Problems the user has to fix by hand; shown in the briefing so a dead
+    # login doesn't go unnoticed in the logs (Outlook was down for weeks).
+    alerts: list = []
+    if not outlook:
+        alerts.append(
+            "Outlook is not connected — its emails, work calendar and drafts are missing "
+            "from this briefing. Run `python agent.py --auth` in the inbox-agent folder to sign in again."
+        )
+    if not gmail:
+        alerts.append(
+            "Gmail is not connected — run `python agent.py --auth` in the inbox-agent folder to sign in again."
+        )
+
     # ── Fetch recent emails (for briefing) ────────────────────────────────────
     logger.info("Fetching recent emails (last 24 h)…")
 
@@ -348,6 +361,7 @@ def run(dry_run: bool = False):
             calendar_events=calendar_events,
             icloud_calendar_events=icloud_calendar_events,
             campaign_highlights=campaign_highlights,
+            alerts=alerts,
         )
         if success:
             logger.info("Morning briefing sent successfully!")

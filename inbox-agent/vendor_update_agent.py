@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 from google.auth.exceptions import RefreshError
 
 from gmail_client import GmailClient, GmailAuthRequired
-from outlook_client import OutlookClient
+from outlook_client import OutlookClient, OutlookAuthRequired
 from docs_client import DocsClient
 from campaign_doc_parser import parse_active_campaigns
 
@@ -450,12 +450,23 @@ def main() -> None:
     gmail_token = os.getenv("GMAIL_TOKEN_PATH", "gmail_token.json")
     user_gmail = os.getenv("USER_GMAIL", "edwardenag@gmail.com")
 
+    # Outlook isn't optional here -- landlord lookup, weekly activity and style
+    # examples all come from it -- but a launchd run has nobody to complete a
+    # device-code/MFA prompt, so exit cleanly with the fix instead of a traceback.
     logger.info("Connecting to Outlook...")
-    outlook = OutlookClient(
-        client_id=os.getenv("AZURE_CLIENT_ID"),
-        tenant_id=os.getenv("AZURE_TENANT_ID"),
-        token_cache_path=msal_cache,
-    )
+    try:
+        outlook = OutlookClient(
+            client_id=os.getenv("AZURE_CLIENT_ID"),
+            tenant_id=os.getenv("AZURE_TENANT_ID"),
+            token_cache_path=msal_cache,
+        )
+    except OutlookAuthRequired as exc:
+        logger.error(
+            "Outlook needs interactive re-consent and this unattended run can't "
+            "provide it -- nothing to draft this run. Fix by running `python "
+            "agent.py --auth` yourself: %s", exc,
+        )
+        sys.exit(1)
 
     # Gmail is optional -- an unattended run (this is a launchd job, nobody is
     # at a keyboard to complete an OAuth consent screen) must not crash just

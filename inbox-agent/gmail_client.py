@@ -3,6 +3,7 @@
 import os
 import base64
 import logging
+import time
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -36,6 +37,25 @@ SCOPES = [
     # used to read live campaign data from the shared Google Doc.
     "https://www.googleapis.com/auth/documents.readonly",
 ]
+
+# Gmail enforces a per-user quota per *minute*, so a rate-limit 403 clears if we
+# wait it out. Delays (seconds) before each retry; the last one covers a full
+# quota window. Exhausting them re-raises the original HttpError.
+_RETRY_DELAYS = (5, 15, 30, 60)
+
+
+def _is_retryable(exc: HttpError) -> bool:
+    """True for transient failures: rate limits (429, or 403 rateLimitExceeded /
+    userRateLimitExceeded) and 5xx server errors. Other 403s (e.g. revoked
+    access) are permanent and must not be retried."""
+    status = getattr(exc.resp, "status", None)
+    if status == 429 or (status is not None and 500 <= status < 600):
+        return True
+    if status != 403:
+        return False
+    body = exc.content.decode("utf-8", "replace") if isinstance(exc.content, bytes) else str(exc.content)
+    return "ratelimitexceeded" in f"{body} {exc}".lower()
+
 
 # Gmail's own ML categorisation for bulk/automated mail. A message carrying
 # any of these never warrants a reply, so has_replied() shouldn't bother
@@ -122,33 +142,52 @@ class GmailClient:
         self.service = build("gmail", "v1", credentials=creds)
         logger.info("Gmail authenticated successfully")
 
+    # ─── Request helper ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _execute(request):
+        """Run a Gmail API request, retrying transient failures with backoff.
+
+        Non-retryable errors, and retryable ones that outlast _RETRY_DELAYS,
+        propagate as the original HttpError for the caller's own handling.
+        """
+        for delay in _RETRY_DELAYS:
+            try:
+                return request.execute()
+            except HttpError as exc:
+                if not _is_retryable(exc):
+                    raise
+                logger.warning("Gmail request throttled/failed (%s) -- retrying in %ds", exc.resp.status, delay)
+                time.sleep(delay)
+        return request.execute()
+
     # ─── Fetch ───────────────────────────────────────────────────────────────
 
     def get_messages(self, query: str = "", max_results: int = 100) -> List[Dict]:
-        """Return full message objects matching a Gmail search query."""
+        """Return full message objects matching a Gmail search query.
+
+        A message that still can't be fetched after retries is skipped rather
+        than discarding everything fetched so far.
+        """
         try:
-            result = (
-                self.service.users()
-                .messages()
-                .list(userId="me", q=query, maxResults=max_results)
-                .execute()
+            result = self._execute(
+                self.service.users().messages().list(userId="me", q=query, maxResults=max_results)
             )
-            message_stubs = result.get("messages", [])
-
-            full_messages = []
-            for stub in message_stubs:
-                msg = (
-                    self.service.users()
-                    .messages()
-                    .get(userId="me", id=stub["id"], format="full")
-                    .execute()
-                )
-                full_messages.append(msg)
-
-            return full_messages
         except HttpError as exc:
             logger.error("Gmail fetch error: %s", exc)
             return []
+
+        full_messages = []
+        for stub in result.get("messages", []):
+            try:
+                full_messages.append(
+                    self._execute(
+                        self.service.users().messages().get(userId="me", id=stub["id"], format="full")
+                    )
+                )
+            except HttpError as exc:
+                logger.error("Gmail fetch error for message %s (skipping): %s", stub["id"], exc)
+        return full_messages
 
     def get_recent_emails(self, since_days: int = 1) -> List[Dict]:
         """Emails received in the last N days (inbox + all mail)."""
@@ -172,11 +211,10 @@ class GmailClient:
         rather than scanning the mailbox.
         """
         try:
-            thread = (
+            thread = self._execute(
                 self.service.users()
                 .threads()
                 .get(userId="me", id=thread_id, format="metadata", metadataHeaders=["From"])
-                .execute()
             )
         except HttpError as exc:
             logger.warning("Thread lookup failed for %s: %s", thread_id, exc)
@@ -209,9 +247,9 @@ class GmailClient:
     def archive_message(self, msg_id: str) -> bool:
         """Archive by removing INBOX label (email stays in All Mail)."""
         try:
-            self.service.users().messages().modify(
+            self._execute(self.service.users().messages().modify(
                 userId="me", id=msg_id, body={"removeLabelIds": ["INBOX"]}
-            ).execute()
+            ))
             return True
         except HttpError as exc:
             logger.error("Archive failed for %s: %s", msg_id, exc)
@@ -223,11 +261,11 @@ class GmailClient:
         if not label_id:
             return False
         try:
-            self.service.users().messages().modify(
+            self._execute(self.service.users().messages().modify(
                 userId="me",
                 id=msg_id,
                 body={"addLabelIds": [label_id], "removeLabelIds": ["INBOX"]},
-            ).execute()
+            ))
             return True
         except HttpError as exc:
             logger.error("Move-to-label failed for %s → %s: %s", msg_id, label_name, exc)
@@ -236,7 +274,7 @@ class GmailClient:
     def trash_message(self, msg_id: str) -> bool:
         """Move to Trash (recoverable for 30 days)."""
         try:
-            self.service.users().messages().trash(userId="me", id=msg_id).execute()
+            self._execute(self.service.users().messages().trash(userId="me", id=msg_id))
             return True
         except HttpError as exc:
             logger.error("Trash failed for %s: %s", msg_id, exc)
@@ -254,9 +292,9 @@ class GmailClient:
             msg.attach(MIMEText(body_html, "html"))
 
             raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-            self.service.users().messages().send(
+            self._execute(self.service.users().messages().send(
                 userId="me", body={"raw": raw}
-            ).execute()
+            ))
             logger.info("Gmail: sent to %s | subject: %s", to, subject)
             return True
         except HttpError as exc:
@@ -275,9 +313,9 @@ class GmailClient:
             msg.attach(MIMEText(body_html, "html"))
 
             raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-            draft = self.service.users().drafts().create(
+            draft = self._execute(self.service.users().drafts().create(
                 userId="me", body={"message": {"raw": raw}}
-            ).execute()
+            ))
             draft_id = draft.get("id")
             logger.info("Gmail: draft created (id=%s) to %s | subject: %s", draft_id, to, subject)
             return draft_id
@@ -293,14 +331,14 @@ class GmailClient:
             return self._label_cache[label_name]
 
         try:
-            result = self.service.users().labels().list(userId="me").execute()
+            result = self._execute(self.service.users().labels().list(userId="me"))
             for label in result.get("labels", []):
                 if label["name"].lower() == label_name.lower():
                     self._label_cache[label_name] = label["id"]
                     return label["id"]
 
             # Label doesn't exist — create it
-            new_label = (
+            new_label = self._execute(
                 self.service.users()
                 .labels()
                 .create(
@@ -311,7 +349,6 @@ class GmailClient:
                         "messageListVisibility": "show",
                     },
                 )
-                .execute()
             )
             logger.info("Created Gmail label: %s", label_name)
             label_id = new_label["id"]

@@ -1,5 +1,6 @@
 """Format and send the morning briefing email to both addresses."""
 
+import html
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -247,8 +248,13 @@ def build_briefing_html(
     calendar_events: Optional[List[Dict]] = None,
     icloud_calendar_events: Optional[List[Dict]] = None,
     campaign_highlights: Optional[List[Dict]] = None,
+    alerts: Optional[List[str]] = None,
 ) -> str:
-    """Assemble the full HTML briefing email."""
+    """Assemble the full HTML briefing email.
+
+    alerts are plain-text problems with this run (e.g. a dead Outlook login)
+    shown in a banner under the header so they aren't buried in the logs.
+    """
 
     todo_html = markdown.markdown(todo_md, extensions=["nl2br"])
     campaign_highlights = campaign_highlights or []
@@ -273,6 +279,16 @@ def build_briefing_html(
         "margin:0 0 18px 0;font-size:13px;font-weight:700;text-transform:uppercase;"
         "letter-spacing:.08em;color:#1e3a5f;"
     )
+
+    alerts_html = ""
+    if alerts:
+        items = "".join(f"<li>{html.escape(a)}</li>" for a in alerts)
+        alerts_html = (
+            '<div style="background:#fef3c7;border-bottom:1px solid #f59e0b;'
+            'padding:16px 36px;color:#78350f;font-size:14px;">'
+            '<strong>⚠️ Needs attention</strong>'
+            f'<ul style="margin:6px 0 0 0;padding-left:20px;line-height:1.6;">{items}</ul></div>'
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -306,6 +322,8 @@ def build_briefing_html(
     <div style="font-size:26px;margin-bottom:6px;">🌅 Morning Briefing</div>
     <div style="opacity:.85;font-size:14px;">{date_str} &nbsp;·&nbsp; Eddie G — IB Property Sydney</div>
   </div>
+
+  {alerts_html}
 
   <!-- Section 1: Today's Calendar -->
   <div style="{section_style}">
@@ -374,6 +392,7 @@ def send_briefing(
     calendar_events: Optional[List[Dict]] = None,
     icloud_calendar_events: Optional[List[Dict]] = None,
     campaign_highlights: Optional[List[Dict]] = None,
+    alerts: Optional[List[str]] = None,
 ) -> bool:
     """
     Build the briefing HTML and send it.
@@ -392,6 +411,7 @@ def send_briefing(
         calendar_events=calendar_events,
         icloud_calendar_events=icloud_calendar_events,
         campaign_highlights=campaign_highlights,
+        alerts=alerts,
     )
 
     sent = False

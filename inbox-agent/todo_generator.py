@@ -111,6 +111,15 @@ Keep each item to one or two lines maximum. Do not pad the list."""
         logger.info("Claude to-do list generated (%d chars)", len(todo_md))
         return todo_md
 
+    except anthropic.AuthenticationError as exc:
+        logger.error("Claude API key rejected: %s", exc)
+        return (
+            f"## Prioritised To-Do — {today}\n\n"
+            f"*(ANTHROPIC_API_KEY was rejected by the API — replace it in "
+            f"inbox-agent/.env to restore the AI to-do list.)*\n\n"
+            f"Please review your inboxes manually."
+        )
+
     except anthropic.APIError as exc:
         logger.error("Claude API error: %s", exc)
         return (
