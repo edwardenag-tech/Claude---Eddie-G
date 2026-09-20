@@ -1,8 +1,9 @@
 """Draft reply agent for IB Property inbox.
 
-Reads Outlook inbox (last 48 hrs), classifies each email via Claude,
-searches for related property emails, then saves reply drafts to both
-Outlook Drafts and Gmail Drafts — nothing is sent automatically.
+Reads Outlook inbox (last 48 hrs) and drafts a reply ONLY to emails that ask
+Eddie a question directly -- not FYI/CC'd mail, not announcements, not every
+enquiry. Saves drafts to both Outlook Drafts and Gmail Drafts; nothing is
+sent automatically.
 
 Usage:
     python draft_agent.py
@@ -44,6 +45,11 @@ USER_GMAIL = os.getenv("USER_GMAIL", "edwardenag@gmail.com").lower()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 CATEGORIES = ["lease_enquiry", "sale_enquiry", "vendor_update", "landlord_query", "general"]
+
+
+# Judgement call where a wrong "yes" puts a junk draft in front of Eddie, so it
+# gets the stronger model rather than the cheap one.
+CLASSIFY_MODEL = "claude-sonnet-4-6"
 
 
 class DraftGenerationError(Exception):
@@ -97,6 +103,17 @@ def is_self_sent(email: Dict) -> bool:
     """True if the sender is one of the user's own addresses."""
     addr = email.get("from", "").lower()
     return USER_OUTLOOK in addr or USER_GMAIL in addr
+
+
+def is_cc_only(email: Dict) -> bool:
+    """True if Eddie is on Cc but not in To -- he's been kept in the loop, not
+    asked. (On the 48h of mail checked when this was written, 13 of 32 emails
+    were exactly that.) Mail where he is in neither field (alias / Bcc) is NOT
+    treated as Cc-only; the classifier judges those."""
+    to_field = (email.get("to") or "").lower()
+    cc_field = (email.get("cc") or "").lower()
+    mine = (USER_OUTLOOK, USER_GMAIL)
+    return any(a in cc_field for a in mine) and not any(a in to_field for a in mine)
 
 
 # ─── Drafted-email state ──────────────────────────────────────────────────────
@@ -853,41 +870,56 @@ def collect_property_data(
 
 # ─── Claude helpers ───────────────────────────────────────────────────────────
 
-def claude_classify(ai: anthropic.Anthropic, email: Dict) -> Tuple[str, bool]:
-    """Return (category, is_lion). is_lion=True means a reply draft should be created."""
+def claude_classify(ai: anthropic.Anthropic, email: Dict) -> Tuple[str, bool, str]:
+    """Return (category, asks_directly, question).
+
+    asks_directly is True only when the newest message puts a question (or a
+    direct request for an answer) to Eddie himself. `question` is the question
+    found; asks_directly is forced False when the model can't name one, so
+    every yes is backed by something Eddie can check. Any non-auth failure
+    fails closed -- no draft -- rather than guessing.
+    """
     prompt = (
-        "You are an assistant for IB Property Sydney, a commercial real estate agency.\n\n"
-        "Classify the following email and decide if it is urgent enough to require a reply draft.\n\n"
-        "Categories:\n"
+        "You are an assistant for Edward Ghattas (edward@ibproperty.com.au), a commercial "
+        "real estate agent at IB Property Sydney.\n\n"
+        "Decide whether the email below ASKS EDWARD A QUESTION DIRECTLY, i.e. whether it needs "
+        "a reply written by him. Be strict: a draft that wasn't needed is worse than a missed one.\n\n"
+        "asks_directly is TRUE only if the sender, in this message's own new text, puts a "
+        "question to Edward personally, or makes a direct request that needs his answer "
+        '(e.g. "what is the asking rent?", "are you free Tuesday?", "can you send the IM?", '
+        '"please confirm the price").\n\n'
+        "asks_directly is FALSE for all of these, even if they contain a question mark:\n"
+        "- FYI, announcements, updates, reports, confirmations, thank-yous, LEASED/SOLD notices\n"
+        "- Edward is only copied in (Cc) or the message is a broadcast to a group\n"
+        "- The question is addressed to someone else, or to the group in general "
+        '("does anyone know...", "@Sarah can you..."), when several people received it\n'
+        "- Rhetorical questions, and questions inside marketing or cold sales outreach "
+        '("Are you looking to refinance?")\n'
+        "- Questions that only appear in quoted earlier messages, forwarded chains, signatures "
+        "or disclaimers -- judge ONLY the sender's new text\n"
+        "- An enquiry that expresses interest but asks nothing (\"I'm interested in this "
+        'property") and makes no request for information or action\n'
+        "- Automated or system messages, newsletters, portal notifications and stats\n\n"
+        "Category (for choosing a reply template, independent of asks_directly):\n"
         "  lease_enquiry   — enquiry about leasing a property\n"
         "  sale_enquiry    — enquiry about buying or selling a property\n"
-        "  vendor_update   — update from a vendor, supplier, or tradesperson\n"
-        "  landlord_query  — query or request from a landlord or property owner\n"
+        "  vendor_update   — from a vendor, supplier, or tradesperson\n"
+        "  landlord_query  — from a landlord or property owner\n"
         "  general         — anything else\n\n"
-        "An email IS a lion (is_lion: true) if:\n"
-        "- It is a direct enquiry from a potential buyer or tenant\n"
-        "- It has a direct question that needs answering from a client, landlord, or vendor\n"
-        "- It involves an offer, contract, or negotiation\n"
-        "- It is from a known contact asking something specific\n"
-        "- Not replying would cause a missed deal, upset a client, or create a problem\n\n"
-        "An email is NOT a lion (is_lion: false) if:\n"
-        "- It is a listing performance report or campaign stats from a portal (realcommercial, commercialrealestate)\n"
-        "- It is a FYI or announcement (LEASED / SOLD notices that need no reply)\n"
-        "- It is a weekly or monthly stats digest or purely informational portal notification\n"
-        "- It is from Grammarly, a newsletter, or a marketing list\n"
-        "- It is an internal IB Property broadcast that requires no reply\n"
-        "- It is just an update with no question or action required\n\n"
-        "Ask yourself: Is this email urgent enough that not replying would cause a problem? "
-        "If it is just an informational update, report, or announcement, answer false.\n\n"
         f"From: {email.get('from_name', '')} <{email.get('from', '')}>\n"
+        f"To: {email.get('to', '')}\n"
+        f"Cc: {email.get('cc', '')}\n"
         f"Subject: {email.get('subject', '')}\n"
-        f"Body: {email.get('body', '')[:600]}\n\n"
-        'Reply with ONLY valid JSON in this exact format: {"category": "<category>", "is_lion": <true|false>}'
+        f"Body: {email.get('body', '')[:2000]}\n\n"
+        "Reply with ONLY valid JSON: "
+        '{"category": "<category>", "asks_directly": <true|false>, '
+        '"question": "<the question or request put to Edward, quoted or closely paraphrased, '
+        'max 200 chars; empty string if asks_directly is false>"}'
     )
     try:
         response = ai.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=60,
+            model=CLASSIFY_MODEL,
+            max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = response.content[0].text.strip()
@@ -895,18 +927,19 @@ def claude_classify(ai: anthropic.Anthropic, email: Dict) -> Tuple[str, bool]:
         raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.IGNORECASE)
         raw = re.sub(r'\s*```$', '', raw).strip()
         data = json.loads(raw)
-        category = data.get("category", "general").lower().strip()
-        is_lion = bool(data.get("is_lion", False))
+        category = str(data.get("category", "general")).lower().strip()
         if category not in CATEGORIES:
             category = "general"
-        return category, is_lion
+        question = str(data.get("question") or "").strip()[:200]
+        asks_directly = bool(data.get("asks_directly", False)) and bool(question)
+        return category, asks_directly, question if asks_directly else ""
     except anthropic.AuthenticationError:
         # A rejected key isn't a per-email problem -- swallowing it here made
         # every email look "not urgent" and the run silently draft nothing.
         raise
     except Exception as exc:
         logger.error("Claude classify failed: %s", exc)
-        return "general", False
+        return "general", False, ""
 
 
 def claude_draft_reply(
@@ -917,8 +950,13 @@ def claude_draft_reply(
     style_examples: Optional[List[str]] = None,
     listing_details: Optional[Dict] = None,
     sent_template: Optional[str] = None,
+    question: Optional[str] = None,
 ) -> Tuple[str, str]:
-    """Return (reply_subject, html_body) for a professional CRE reply."""
+    """Return (reply_subject, html_body) for a professional CRE reply.
+
+    question is what the classifier found Eddie being asked; only the generic
+    (non-enquiry-template) reply uses it, to answer that specifically.
+    """
     attachments_note = ""
     if related_attachments:
         names = ", ".join(related_attachments[:10])
@@ -1183,6 +1221,10 @@ def claude_draft_reply(
             f"{attachments_note}\n\n"
             "--- Instructions ---\n"
             f"Context: {category_context.get(category, category_context['general'])}\n"
+            + (f"- The question Edward is being asked, which the reply must address: {question}\n" if question else "")
+            + "- Do NOT invent facts, figures, dates, availability or commitments. Where the answer "
+            "depends on information or a decision only Edward has, write a short bracketed note "
+            "such as [EDDIE TO CONFIRM: rent figure] instead of guessing\n"
             "- Greet by first name where possible\n"
             "- Keep the reply under 180 words\n"
             "- Sign off as:\n"
@@ -1219,7 +1261,9 @@ def claude_draft_reply(
 
 # ─── Send quality gate ("Sirius Cafe" bar) ─────────────────────────────────────
 
-_PLACEHOLDER_RE = re.compile(r"\[PLEASE ADD[^\]]*\]|\[SUBURB\]|\[LANDLORD[^\]]*\]")
+_PLACEHOLDER_RE = re.compile(
+    r"\[PLEASE ADD[^\]]*\]|\[SUBURB\]|\[LANDLORD[^\]]*\]|\[EDDIE TO CONFIRM[^\]]*\]"
+)
 
 
 def meets_send_quality_bar(category: str, html_body: str) -> Tuple[bool, str]:
@@ -1364,6 +1408,10 @@ def main(
             logger.info("SKIPPED (promotional): %s | from=%s", subject, from_addr)
             return "skipped"
 
+        if is_cc_only(email):
+            logger.info("SKIPPED (Eddie is only Cc'd): %s | from=%s", subject, from_addr)
+            return "skipped"
+
         if message_key in state:
             logger.info("Skip (draft already created on %s): %s", state[message_key], subject)
             return "skipped"
@@ -1375,13 +1423,14 @@ def main(
         # ── Process ──────────────────────────────────────────────────────────
         logger.info("Processing: %s | from=%s", subject, from_addr)
 
-        # 1. Classify + lion check
-        category, is_lion = claude_classify(ai, email)
-        logger.info("  Category → %s | is_lion=%s", category, is_lion)
+        # 1. Classify + "does this ask Eddie something directly?" check
+        category, asks_directly, question = claude_classify(ai, email)
+        logger.info("  Category → %s | asks_directly=%s", category, asks_directly)
 
-        if not is_lion:
-            logger.info("SKIPPED (not urgent): %s", subject)
+        if not asks_directly:
+            logger.info("SKIPPED (no question put directly to Eddie): %s", subject)
             return "skipped"
+        logger.info("  Question to Eddie: %s", question)
 
         # 2. Find related emails by property hint; collect attachment names
         related_attachments: List[str] = []
@@ -1429,13 +1478,14 @@ def main(
             style_examples=examples,
             listing_details=listing_details,
             sent_template=sent_template,
+            question=question,
         )
         placeholders = _PLACEHOLDER_RE.findall(html_body)
         if placeholders:
             logger.warning("  Draft still has %d unresolved placeholder(s): %s", len(placeholders), placeholders)
         entry = {
             "subject": reply_subject, "from": from_addr, "category": category,
-            "placeholders": placeholders,
+            "question": question, "placeholders": placeholders,
         }
 
         plain_body = re.sub(r"<[^>]+>", " ", html_body)
@@ -1445,6 +1495,7 @@ def main(
             print("\n" + "=" * 70)
             print(f"[DRY RUN] would draft  TO: {email.get('from_name')} <{from_addr}>")
             print(f"SUBJECT: {reply_subject}   (category={category})")
+            print(f"QUESTION PUT TO EDDIE: {question}")
             print("-" * 70)
             print(plain_body)
             print("=" * 70)
@@ -1564,12 +1615,14 @@ def test_draft(max_scan: int = 20, subject_filter: str = "") -> None:
         if subject_filter and subject_filter.lower() not in email.get("subject", "").lower():
             continue
 
-        category, is_lion = claude_classify(ai, email)
+        if is_cc_only(email):
+            continue
+        category, asks_directly, question = claude_classify(ai, email)
         if category not in ("lease_enquiry", "sale_enquiry"):
             logger.info("  Skipping (category=%s): %s", category, email.get("subject"))
             continue
-        if not is_lion:
-            logger.info("  Skipping (not urgent, is_lion=False): %s", email.get("subject"))
+        if not asks_directly:
+            logger.info("  Skipping (no question put directly to Eddie): %s", email.get("subject"))
             continue
 
         logger.info("Found enquiry: %s | category=%s", email.get("subject"), category)

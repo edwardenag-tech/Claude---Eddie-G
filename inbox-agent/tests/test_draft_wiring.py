@@ -21,8 +21,16 @@ from outlook_client import OutlookClient, OutlookAuthRequired
 ENV = {"ANTHROPIC_API_KEY": "k", "AZURE_CLIENT_ID": "c", "AZURE_TENANT_ID": "t"}
 
 
-def _raw(n, subject="Enquiry 12 Smith Street Sydney", sender="buyer@example.com"):
+ME = "edward@ibproperty.com.au"
+
+
+def _addrs(*addresses):
+    return [{"emailAddress": {"address": a}} for a in addresses]
+
+
+def _raw(n, subject="Enquiry 12 Smith Street Sydney", sender="buyer@example.com", to=(ME,), cc=()):
     return {
+        "toRecipients": _addrs(*to), "ccRecipients": _addrs(*cc),
         "id": f"id{n}", "internetMessageId": f"<msg{n}@x>", "conversationId": f"conv{n}",
         "subject": subject, "bodyPreview": "hi",
         "from": {"emailAddress": {"address": sender, "name": "Bob Buyer"}},
@@ -49,7 +57,7 @@ class DraftMainCase(unittest.TestCase):
             "related": patch("draft_agent.outlook_search_related", return_value=[]),
             "sent_reply": patch("draft_agent.fetch_sent_reply_for_address", return_value=None),
             "collect": patch("draft_agent.collect_property_data", return_value={"address": "12 Smith Street"}),
-            "classify": patch("draft_agent.claude_classify", return_value=("sale_enquiry", True)),
+            "classify": patch("draft_agent.claude_classify", return_value=("sale_enquiry", True, "What is the price guide?")),
             "draft": patch("draft_agent.claude_draft_reply", return_value=("Re: x", "<p>Hi Bob</p>")),
             "o_draft": patch("draft_agent.outlook_create_draft", return_value="OD1"),
             "g_draft": patch("draft_agent.gmail_create_draft", return_value="GD1"),
@@ -134,6 +142,40 @@ class DraftMainCase(unittest.TestCase):
         self.m["o_draft"].assert_called_once()
         self.m["g_draft"].assert_not_called()
 
+    def test_cc_only_email_is_skipped_before_any_ai_call(self):
+        self.outlook.get_recent_emails.return_value = [_raw(1, to=("someone@else.com",), cc=(ME,))]
+        summary = draft_agent.main(allow_auto_send=False)
+        self.assertEqual((summary["drafted"], summary["skipped"]), (0, 1))
+        self.m["classify"].assert_not_called()
+        self.m["draft"].assert_not_called()
+
+    def test_direct_recipient_among_several_is_still_considered(self):
+        self.outlook.get_recent_emails.return_value = [_raw(1, to=(ME, "sarah@ibproperty.com.au"), cc=("boss@x.com",))]
+        self.assertEqual(draft_agent.main(allow_auto_send=False)["drafted"], 1)
+
+    def test_email_where_eddie_is_in_neither_field_goes_to_the_classifier(self):
+        # alias / Bcc delivery -- must not be dropped by the cheap recipient filter
+        self.outlook.get_recent_emails.return_value = [_raw(1, to=("enquiries@ibproperty.com.au",))]
+        draft_agent.main(allow_auto_send=False)
+        self.m["classify"].assert_called_once()
+
+    def test_no_direct_question_means_no_draft_whatever_the_category(self):
+        for category in ("sale_enquiry", "lease_enquiry", "landlord_query", "general"):
+            self.m["classify"].return_value = (category, False, "")
+            summary = draft_agent.main(allow_auto_send=False)
+            self.assertEqual(summary["drafted"], 0, category)
+        self.m["draft"].assert_not_called()
+
+    def test_non_enquiry_email_with_a_direct_question_does_get_a_draft(self):
+        self.m["classify"].return_value = ("landlord_query", True, "Can you confirm Tuesday's inspection?")
+        summary = draft_agent.main(allow_auto_send=False)
+        self.assertEqual(summary["drafted"], 1)
+        self.assertEqual(self.m["draft"].call_args.kwargs["question"], "Can you confirm Tuesday's inspection?")
+
+    def test_dry_run_summary_carries_the_detected_question(self):
+        summary = draft_agent.main(dry_run=True)
+        self.assertEqual(summary["drafts"][0]["question"], "What is the price guide?")
+
 
 class TestClassifyAuthPassthrough(unittest.TestCase):
     def test_auth_error_propagates_other_errors_are_swallowed(self):
@@ -143,7 +185,75 @@ class TestClassifyAuthPassthrough(unittest.TestCase):
         with self.assertRaises(anthropic.AuthenticationError):
             draft_agent.claude_classify(ai, {})
         ai.messages.create.side_effect = RuntimeError("timeout")
-        self.assertEqual(draft_agent.claude_classify(ai, {}), ("general", False))
+        self.assertEqual(draft_agent.claude_classify(ai, {}), ("general", False, ""))
+
+
+class TestClassifierContract(unittest.TestCase):
+    def _classify(self, reply_text, email=None):
+        ai = MagicMock()
+        ai.messages.create.return_value.content = [MagicMock(text=reply_text)]
+        return draft_agent.claude_classify(ai, email or {"subject": "s", "body": "b"}), ai
+
+    def test_yes_with_a_question_is_accepted(self):
+        result, _ = self._classify(
+            '{"category": "lease_enquiry", "asks_directly": true, "question": "What is the rent?"}')
+        self.assertEqual(result, ("lease_enquiry", True, "What is the rent?"))
+
+    def test_yes_without_a_question_is_downgraded_to_no(self):
+        result, _ = self._classify('{"category": "general", "asks_directly": true, "question": ""}')
+        self.assertEqual(result, ("general", False, ""))
+
+    def test_no_drops_any_stray_question_text(self):
+        result, _ = self._classify('{"category": "general", "asks_directly": false, "question": "x?"}')
+        self.assertEqual(result, ("general", False, ""))
+
+    def test_garbage_or_fenced_output_fails_closed_or_parses(self):
+        self.assertEqual(self._classify("not json")[0], ("general", False, ""))
+        fenced = '```json\n{"category": "sale_enquiry", "asks_directly": true, "question": "Price?"}\n```'
+        self.assertEqual(self._classify(fenced)[0], ("sale_enquiry", True, "Price?"))
+
+    def test_unknown_category_falls_back_to_general(self):
+        result, _ = self._classify('{"category": "weird", "asks_directly": true, "question": "Q?"}')
+        self.assertEqual(result[0], "general")
+
+    def test_prompt_shows_recipients_and_uses_the_strong_model(self):
+        _, ai = self._classify(
+            '{"category": "general", "asks_directly": false, "question": ""}',
+            {"to": "a@x.com, b@x.com", "cc": "c@x.com", "subject": "s", "body": "b"},
+        )
+        kwargs = ai.messages.create.call_args.kwargs
+        prompt = kwargs["messages"][0]["content"]
+        self.assertIn("To: a@x.com, b@x.com", prompt)
+        self.assertIn("Cc: c@x.com", prompt)
+        self.assertEqual(kwargs["model"], draft_agent.CLASSIFY_MODEL)
+
+
+class TestIsCcOnly(unittest.TestCase):
+    def test_cases(self):
+        f = draft_agent.is_cc_only
+        self.assertTrue(f({"to": "x@y.com", "cc": ME}))
+        self.assertFalse(f({"to": ME, "cc": ""}))
+        self.assertFalse(f({"to": f"x@y.com, {ME}", "cc": "z@y.com"}))
+        self.assertFalse(f({"to": ME, "cc": ME}))            # in both -> direct
+        self.assertFalse(f({"to": "alias@ibproperty.com.au", "cc": ""}))  # neither
+        self.assertFalse(f({}))
+
+
+class TestGenericDraftPrompt(unittest.TestCase):
+    def test_generic_reply_gets_the_question_and_no_invention_rule(self):
+        ai = MagicMock()
+        ai.messages.create.return_value.content = [MagicMock(text="<p>ok</p>")]
+        draft_agent.claude_draft_reply(
+            ai, {"subject": "Q", "body": "b", "from": "a@b.com"}, "landlord_query", [],
+            question="Can you confirm Tuesday?",
+        )
+        prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("Can you confirm Tuesday?", prompt)
+        self.assertIn("Do NOT invent", prompt)
+        self.assertIn("[EDDIE TO CONFIRM", prompt)
+
+    def test_confirm_placeholder_counts_as_unresolved(self):
+        self.assertTrue(draft_agent._PLACEHOLDER_RE.findall("<p>Rent is [EDDIE TO CONFIRM: rent]</p>"))
 
 
 class TestDraftedState(unittest.TestCase):
@@ -172,7 +282,7 @@ class TestRunDraftStep(unittest.TestCase):
         with patch("draft_agent.main", return_value={"drafted": 2, "failed": 1}) as m:
             agent.run_draft_step(MagicMock(), alerts, dry_run=False)
         m.assert_called_once_with(dry_run=False, allow_auto_send=False)
-        self.assertTrue(any("2 enquiry reply drafts waiting" in a for a in alerts))
+        self.assertTrue(any("2 reply drafts waiting" in a for a in alerts))
         self.assertTrue(any("1 email(s) could not be drafted" in a for a in alerts))
 
     def test_dry_run_adds_no_alerts(self):
