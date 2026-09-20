@@ -163,6 +163,54 @@ def build_icloud_client(cfg: dict):
         return None
 
 
+# ─── Enquiry-reply drafting ──────────────────────────────────────────────────
+
+def run_draft_step(outlook, alerts: list, dry_run: bool = False):
+    """Run draft_agent for the daily run. Never raises, never sends.
+
+    The 2-week trial is draft-only, so auto-send is forced off here whatever
+    AUTO_SEND_ENABLED says. Drafting needs Outlook (that's where the enquiries
+    arrive); with Outlook down it's skipped -- the Outlook alert already covers
+    it. Problems and waiting drafts are appended to `alerts` for the briefing.
+    Returns draft_agent's summary dict, or None if drafting didn't run.
+    """
+    if not outlook:
+        logger.info("Outlook not connected — skipping enquiry-reply drafting")
+        return None
+
+    logger.info("Drafting enquiry replies%s…", " (DRY RUN — preview only, nothing saved)" if dry_run else "")
+    try:
+        from draft_agent import main as draft_agent_main
+        summary = draft_agent_main(dry_run=dry_run, allow_auto_send=False)
+    except SystemExit:
+        # draft_agent.main() sys.exit()s on missing config; SystemExit isn't an
+        # Exception, so without this it would abort the whole briefing run.
+        logger.error("Enquiry-reply drafting aborted (missing config — see log above); continuing")
+        alerts.append("Enquiry-reply drafting did not run: required settings are missing from .env.")
+        return None
+    except Exception as exc:
+        import anthropic
+        logger.error("Enquiry-reply drafting failed (continuing): %s", exc)
+        reason = (
+            "the Anthropic API key was rejected — replace ANTHROPIC_API_KEY in .env"
+            if isinstance(exc, anthropic.AuthenticationError) else str(exc)
+        )
+        alerts.append(f"Enquiry-reply drafting failed this run: {reason}")
+        return None
+
+    logger.info("Enquiry-reply drafting done")
+    if not dry_run and summary:
+        if summary["drafted"]:
+            n = summary["drafted"]
+            alerts.append(
+                f"{n} enquiry reply draft{'s' if n != 1 else ''} waiting for your review in "
+                "Outlook/Gmail Drafts (trial: nothing is sent automatically)."
+            )
+        if summary["failed"]:
+            alerts.append(f"{summary['failed']} email(s) could not be drafted — see the run log.")
+    return summary
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def run(dry_run: bool = False):
@@ -266,16 +314,7 @@ def run(dry_run: bool = False):
         )
 
     # ── Draft enquiry replies ─────────────────────────────────────────────────
-    if dry_run:
-        logger.info("[DRY RUN] Skipping enquiry-reply drafting")
-    else:
-        logger.info("Drafting enquiry replies…")
-        try:
-            from draft_agent import main as draft_agent_main
-            draft_agent_main()
-            logger.info("Enquiry-reply drafting done")
-        except Exception as exc:
-            logger.error("Enquiry-reply drafting failed (continuing): %s", exc)
+    run_draft_step(outlook, alerts, dry_run=dry_run)
 
     # ── Generate to-do list ───────────────────────────────────────────────────
     todo_list = ""

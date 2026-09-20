@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 import anthropic
 
 from outlook_client import OutlookClient
-from gmail_client import GmailClient
+from gmail_client import GmailClient, GmailAuthRequired
 from docs_client import DocsClient
 from campaign_doc_parser import parse_active_campaigns
 
@@ -44,6 +44,12 @@ USER_GMAIL = os.getenv("USER_GMAIL", "edwardenag@gmail.com").lower()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 CATEGORIES = ["lease_enquiry", "sale_enquiry", "vendor_update", "landlord_query", "general"]
+
+
+class DraftGenerationError(Exception):
+    """Claude couldn't produce a real draft (API failure). Raised instead of
+    saving a generic stand-in reply, so a placeholder never lands in Drafts
+    looking like a real draft -- and never gets recorded as 'done'."""
 
 # Same live campaign doc vendor_update_agent.py reads -- see docs_client.py /
 # campaign_doc_parser.py. Eddie keeps its Status/price/key-facts fields in
@@ -91,6 +97,31 @@ def is_self_sent(email: Dict) -> bool:
     """True if the sender is one of the user's own addresses."""
     addr = email.get("from", "").lower()
     return USER_OUTLOOK in addr or USER_GMAIL in addr
+
+
+# ─── Drafted-email state ──────────────────────────────────────────────────────
+# main() looks back 48h but the scheduled run is daily, so without memory every
+# email would be seen (and drafted) twice. Keyed by internetMessageId, which --
+# unlike Outlook's message id -- survives the email being moved between folders.
+
+_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "draft_agent_state.json")
+_STATE_TTL_DAYS = 14
+
+
+def load_drafted_state(path: Optional[str] = None) -> Dict[str, str]:
+    """Return {message key: ISO date drafted}, dropping entries older than the TTL."""
+    try:
+        with open(path or _STATE_PATH) as fh:
+            state = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    cutoff = (datetime.now() - timedelta(days=_STATE_TTL_DAYS)).strftime("%Y-%m-%d")
+    return {k: v for k, v in state.items() if isinstance(v, str) and v >= cutoff}
+
+
+def save_drafted_state(state: Dict[str, str], path: Optional[str] = None) -> None:
+    with open(path or _STATE_PATH, "w") as fh:
+        json.dump(state, fh, indent=2, sort_keys=True)
 
 
 # ─── Outlook helpers ──────────────────────────────────────────────────────────
@@ -869,6 +900,10 @@ def claude_classify(ai: anthropic.Anthropic, email: Dict) -> Tuple[str, bool]:
         if category not in CATEGORIES:
             category = "general"
         return category, is_lion
+    except anthropic.AuthenticationError:
+        # A rejected key isn't a per-email problem -- swallowing it here made
+        # every email look "not urgent" and the run silently draft nothing.
+        raise
     except Exception as exc:
         logger.error("Claude classify failed: %s", exc)
         return "general", False
@@ -924,11 +959,7 @@ def claude_draft_reply(
             html_body = re.sub(r'\s*```$', '', html_body).strip()
         except Exception as exc:
             logger.error("Claude sent-template draft failed: %s", exc)
-            html_body = (
-                "<p>Thank you for your email. I will review this and get back to you shortly.</p>"
-                "<p>Kind regards,<br>Edward Ghattas<br>IB Property Sydney<br>"
-                "edward@ibproperty.com.au</p>"
-            )
+            raise DraftGenerationError(str(exc)) from exc
         original_subject = email.get("subject", "")
         reply_subject = (
             original_subject
@@ -1175,11 +1206,7 @@ def claude_draft_reply(
         html_body = html_body.strip()
     except Exception as exc:
         logger.error("Claude draft failed: %s", exc)
-        html_body = (
-            "<p>Thank you for your email. I will review this and get back to you shortly.</p>"
-            "<p>Kind regards,<br>Edward Ghattas<br>IB Property Sydney<br>"
-            "edward@ibproperty.com.au</p>"
-        )
+        raise DraftGenerationError(str(exc)) from exc
 
     original_subject = email.get("subject", "")
     reply_subject = (
@@ -1222,8 +1249,25 @@ def meets_send_quality_bar(category: str, html_body: str) -> Tuple[bool, str]:
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
-def main(max_emails: Optional[int] = None) -> None:
-    logger.info("=== Draft Agent starting — %s ===", datetime.now().strftime("%Y-%m-%d %H:%M"))
+def main(
+    max_emails: Optional[int] = None,
+    dry_run: bool = False,
+    allow_auto_send: Optional[bool] = None,
+) -> Dict:
+    """Draft replies to urgent emails in Outlook and save them to Drafts.
+
+    dry_run: do everything except write -- nothing saved to Outlook/Gmail
+        Drafts, nothing sent, no state recorded -- and print each draft instead.
+    allow_auto_send: None follows the AUTO_SEND_ENABLED env var; False forces
+        draft-only regardless (the scheduled run passes False for the trial).
+
+    Returns a summary dict: counts plus one entry per draft (real or dry-run).
+    """
+    logger.info(
+        "=== Draft Agent starting — %s%s ===",
+        datetime.now().strftime("%Y-%m-%d %H:%M"),
+        " [DRY RUN -- nothing will be saved or sent]" if dry_run else "",
+    )
 
     # Validate required env vars
     missing = [k for k in ("ANTHROPIC_API_KEY", "AZURE_CLIENT_ID", "AZURE_TENANT_ID") if not os.getenv(k)]
@@ -1234,6 +1278,7 @@ def main(max_emails: Optional[int] = None) -> None:
     msal_cache = os.getenv("MSAL_TOKEN_CACHE_PATH", "msal_token_cache.bin")
     gmail_creds = os.getenv("GMAIL_CREDENTIALS_PATH", "gmail_credentials.json")
     gmail_token = os.getenv("GMAIL_TOKEN_PATH", "gmail_token.json")
+    auto_send = AUTO_SEND_ENABLED if allow_auto_send is None else allow_auto_send
 
     # Initialise clients
     logger.info("Connecting to Outlook (Microsoft Graph)...")
@@ -1243,8 +1288,17 @@ def main(max_emails: Optional[int] = None) -> None:
         token_cache_path=msal_cache,
     )
 
+    # Gmail is only the second copy of each draft -- a dead Gmail login must not
+    # stop the Outlook drafts.
     logger.info("Connecting to Gmail...")
-    gmail = GmailClient(credentials_path=gmail_creds, token_path=gmail_token)
+    try:
+        gmail: Optional[GmailClient] = GmailClient(credentials_path=gmail_creds, token_path=gmail_token)
+    except GmailAuthRequired as exc:
+        logger.error(
+            "Gmail needs interactive re-consent -- Gmail drafts skipped this run "
+            "(Outlook drafts still created). Run `python agent.py --auth`: %s", exc,
+        )
+        gmail = None
 
     logger.info("Connecting to Google Docs (live campaign source)...")
     try:
@@ -1263,15 +1317,16 @@ def main(max_emails: Optional[int] = None) -> None:
     else:
         logger.info("listings_db.json not found or empty — run refresh_listings_db.py to build it")
 
-    # Load live campaigns from the Google Doc (primary source, see collect_property_data)
+    # Load live campaigns from the Google Doc (primary source, see collect_property_data).
+    # Fetched fresh on every run -- no cache -- so edits made before the next run apply.
     campaigns = load_campaigns_from_doc(docs)
     logger.info("Loaded %d active campaign(s) from the live doc", len(campaigns))
 
-    if AUTO_SEND_ENABLED:
+    if auto_send:
         logger.warning(
-            "AUTO_SEND_ENABLED=true — enquiry replies that clear the quality bar "
+            "AUTO-SEND IS ON — enquiry replies that clear the quality bar "
             "(meets_send_quality_bar) will be SENT, not just drafted. Make sure "
-            "Eddie has explicitly reviewed real examples before this var was set."
+            "Eddie has explicitly reviewed real examples before this was enabled."
         )
 
     # Fetch style examples from Sent Items (used for enquiry drafts)
@@ -1284,35 +1339,38 @@ def main(max_emails: Optional[int] = None) -> None:
     raw_messages = outlook.get_recent_emails(since_days=2, extra_folders=["Front Of Mind"])
     logger.info("Retrieved %d messages", len(raw_messages))
 
-    drafted = 0
-    auto_sent = 0
-    skipped = 0
-
     if max_emails is not None:
         raw_messages = raw_messages[:max_emails]
 
-    for raw in raw_messages:
+    state = load_drafted_state()
+    counts = {"drafted": 0, "auto_sent": 0, "skipped": 0, "failed": 0}
+    draft_log: List[Dict] = []
+
+    def process(raw: Dict) -> str:
+        """Handle one message. Returns 'drafted' | 'auto_sent' | 'skipped' | 'failed'."""
         email = OutlookClient.extract_email_data(raw)
         subject = email.get("subject", "(no subject)")
         from_addr = email.get("from", "")
         msg_id = email.get("id", "")
         conversation_id = raw.get("conversationId", "")
+        message_key = raw.get("internetMessageId") or msg_id
 
         # ── Skip conditions ──────────────────────────────────────────────────
         if is_self_sent(email):
             logger.debug("Skip (self-sent): %s", subject)
-            skipped += 1
-            continue
+            return "skipped"
 
         if is_automated(email):
             logger.info("SKIPPED (promotional): %s | from=%s", subject, from_addr)
-            skipped += 1
-            continue
+            return "skipped"
+
+        if message_key in state:
+            logger.info("Skip (draft already created on %s): %s", state[message_key], subject)
+            return "skipped"
 
         if outlook_already_replied(outlook, conversation_id):
             logger.info("Skip (already replied): %s", subject)
-            skipped += 1
-            continue
+            return "skipped"
 
         # ── Process ──────────────────────────────────────────────────────────
         logger.info("Processing: %s | from=%s", subject, from_addr)
@@ -1323,8 +1381,7 @@ def main(max_emails: Optional[int] = None) -> None:
 
         if not is_lion:
             logger.info("SKIPPED (not urgent): %s", subject)
-            skipped += 1
-            continue
+            return "skipped"
 
         # 2. Find related emails by property hint; collect attachment names
         related_attachments: List[str] = []
@@ -1345,13 +1402,22 @@ def main(max_emails: Optional[int] = None) -> None:
         listing_details = None
 
         if is_enq:
-            # Try to find a past sent reply for the same property first
-            address = _extract_address(email.get("subject", ""), email.get("body", "")[:500])
-            sent_template = fetch_sent_reply_for_address(outlook, address)
+            # The live campaign doc outranks Sent Items: replaying an old sent
+            # reply would ignore Eddie's latest edits (price, status, special
+            # notes). Only fall back to a past reply when the doc has no entry.
+            doc_address = _extract_address(subject, email.get("body", ""))
+            campaign_match = find_campaign_for_address(campaigns, doc_address) if doc_address else None
+            if campaign_match:
+                logger.info(
+                    "  Campaign doc entry found (%s) -- using it, not a past Sent Items reply",
+                    campaign_match.get("address"),
+                )
+            else:
+                address = _extract_address(subject, email.get("body", "")[:500])
+                sent_template = fetch_sent_reply_for_address(outlook, address)
             if sent_template:
                 logger.info("  Using Sent Items template for reply")
             else:
-                # Fall back to listings_db / multi-source data collection
                 listing_details = collect_property_data(
                     outlook, raw, email, category, listings_db=listings_db, campaigns=campaigns
                 )
@@ -1364,62 +1430,94 @@ def main(max_emails: Optional[int] = None) -> None:
             listing_details=listing_details,
             sent_template=sent_template,
         )
+        placeholders = _PLACEHOLDER_RE.findall(html_body)
+        if placeholders:
+            logger.warning("  Draft still has %d unresolved placeholder(s): %s", len(placeholders), placeholders)
+        entry = {
+            "subject": reply_subject, "from": from_addr, "category": category,
+            "placeholders": placeholders,
+        }
 
-        # 4. Auto-send gate (OFF unless AUTO_SEND_ENABLED=true -- see main() setup
-        #    and meets_send_quality_bar). If it fires, send directly and skip
-        #    draft creation for this email; otherwise fall through to drafting
-        #    exactly as before.
-        if AUTO_SEND_ENABLED and is_enq:
+        plain_body = re.sub(r"<[^>]+>", " ", html_body)
+        plain_body = re.sub(r"\s{2,}", " ", plain_body).strip()
+
+        if dry_run:
+            print("\n" + "=" * 70)
+            print(f"[DRY RUN] would draft  TO: {email.get('from_name')} <{from_addr}>")
+            print(f"SUBJECT: {reply_subject}   (category={category})")
+            print("-" * 70)
+            print(plain_body)
+            print("=" * 70)
+            draft_log.append(entry)
+            return "drafted"
+
+        # 4. Auto-send gate (off for the trial -- see main() docstring and
+        #    meets_send_quality_bar). If it fires, send directly and skip
+        #    draft creation for this email.
+        if auto_send and is_enq:
             ok, reason = meets_send_quality_bar(category, html_body)
             if ok:
                 sent_ok = outlook.send_reply(msg_id, html_body)
                 if sent_ok:
-                    auto_sent += 1
                     logger.info("  AUTO-SENT '%s' (%s)", reply_subject, reason)
-                    continue
-                else:
-                    logger.error("  Auto-send failed, falling back to draft for: %s", subject)
+                    state[message_key] = datetime.now().strftime("%Y-%m-%d")
+                    save_drafted_state(state)
+                    return "auto_sent"
+                logger.error("  Auto-send failed, falling back to draft for: %s", subject)
             else:
                 logger.info("  Not auto-sending (%s) -- drafting instead", reason)
 
         # 5. Save to Outlook Drafts (threaded reply via createReply + PATCH)
-        outlook_id = outlook_create_draft(
-            outlook,
-            email_id=msg_id,
-            html_body=html_body,
-        )
+        outlook_id = outlook_create_draft(outlook, email_id=msg_id, html_body=html_body)
 
         # 6. Save to Gmail Drafts (reply headers from Outlook's internetMessageId)
-        internet_message_id = raw.get("internetMessageId", "")
-        plain_body = re.sub(r"<[^>]+>", " ", html_body)
-        plain_body = re.sub(r"\s{2,}", " ", plain_body).strip()
-        gmail_id = gmail_create_draft(
-            gmail,
-            to_address=from_addr,
-            subject=reply_subject,
-            html_body=html_body,
-            plain_body=plain_body,
-            in_reply_to=internet_message_id,
-        )
+        gmail_id = None
+        if gmail:
+            gmail_id = gmail_create_draft(
+                gmail,
+                to_address=from_addr,
+                subject=reply_subject,
+                html_body=html_body,
+                plain_body=plain_body,
+                in_reply_to=raw.get("internetMessageId", ""),
+            )
 
         # 7. Log outcome
         if outlook_id or gmail_id:
-            drafted += 1
             logger.info(
                 "  Drafted '%s' → outlook=%s gmail=%s",
                 reply_subject,
                 outlook_id or "FAILED",
-                gmail_id or "FAILED",
+                (gmail_id or "FAILED") if gmail else "skipped (Gmail not connected)",
             )
-        else:
-            logger.warning("  Both draft saves failed for: %s", subject)
+            state[message_key] = datetime.now().strftime("%Y-%m-%d")
+            save_drafted_state(state)
+            draft_log.append(entry)
+            return "drafted"
+
+        logger.warning("  Both draft saves failed for: %s", subject)
+        return "failed"
+
+    for raw in raw_messages:
+        try:
+            outcome = process(raw)
+        except anthropic.AuthenticationError:
+            raise  # the key is bad for every email -- stop and let the caller report it
+        except Exception as exc:
+            logger.error("  Drafting failed for %r -- skipping it, continuing: %s", raw.get("subject"), exc)
+            outcome = "failed"
+        counts[outcome] += 1
 
     logger.info(
-        "=== Done: %d draft(s) created, %d auto-sent, %d email(s) skipped ===",
-        drafted,
-        auto_sent,
-        skipped,
+        "=== Done%s: %d draft(s) %s, %d auto-sent, %d skipped, %d failed ===",
+        " (DRY RUN)" if dry_run else "",
+        counts["drafted"],
+        "previewed" if dry_run else "created",
+        counts["auto_sent"],
+        counts["skipped"],
+        counts["failed"],
     )
+    return {**counts, "drafts": draft_log, "campaigns": len(campaigns), "dry_run": dry_run}
 
 
 def test_draft(max_scan: int = 20, subject_filter: str = "") -> None:
@@ -1527,9 +1625,14 @@ if __name__ == "__main__":
         default="",
         help="Filter: only test against emails whose subject contains this string",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run the full drafting pass but save/send nothing; print each draft instead",
+    )
     args = parser.parse_args()
 
     if args.test:
         test_draft(subject_filter=args.subject)
     else:
-        main()
+        main(dry_run=args.dry_run)

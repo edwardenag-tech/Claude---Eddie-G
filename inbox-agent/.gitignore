@@ -15,3 +15,4 @@ venv/
 
 # Run logs (contain email subjects)
 logs/
+draft_agent_state.json
