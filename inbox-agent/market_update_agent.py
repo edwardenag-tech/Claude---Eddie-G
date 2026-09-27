@@ -231,25 +231,23 @@ def read_recipients(
     return recipients
 
 
-def dedupe_by_owner(recipients: List[Recipient]) -> "tuple[List[Recipient], Dict[str, int]]":
-    """Keep one recipient per unique email within the segment.
+def dedupe_by_owner_and_suburb(recipients: List[Recipient]) -> "tuple[List[Recipient], Dict[tuple, int]]":
+    """Keep one recipient per (email, suburb) pair within the segment.
 
-    Real data check (Sep 2026): within a single segment, the same email can
-    repeat up to 40 times -- one landlord/company owning many properties.
-    Drafting one email per PROPERTY would mean sending that owner dozens of
-    separate market-update emails in one run, which is almost certainly not
-    what's wanted. Default: keep the first row seen per email, report how
-    many extra properties each repeated owner has so Eddie can see the
-    scale of what's being collapsed. This is a judgment call, not something
-    the brief specified -- flagged in the status report for Eddie to confirm.
+    Per Eddie: one email per owner PER SUBURB, not one per owner overall. An
+    owner with several properties in the SAME suburb still gets only one
+    draft for that suburb (first row seen wins); an owner with properties in
+    two different suburbs gets one draft per suburb, each addressed with
+    that suburb's own details. Suburb is matched case-insensitively.
     """
-    seen: Dict[str, Recipient] = {}
-    extra_properties: Dict[str, int] = {}
+    seen: Dict[tuple, Recipient] = {}
+    extra_properties: Dict[tuple, int] = {}
     for r in recipients:
-        if r.email in seen:
-            extra_properties[r.email] = extra_properties.get(r.email, 0) + 1
+        key = (r.email, r.suburb.strip().lower())
+        if key in seen:
+            extra_properties[key] = extra_properties.get(key, 0) + 1
             continue
-        seen[r.email] = r
+        seen[key] = r
     return list(seen.values()), extra_properties
 
 
@@ -400,11 +398,12 @@ def run(
             summary[segment_key] = {"error": str(exc)}
             continue
 
-        recipients, extra_properties = dedupe_by_owner(recipients)
+        recipients, extra_properties = dedupe_by_owner_and_suburb(recipients)
         suburbs = sorted({r.suburb for r in recipients if r.suburb})
         logger.info(
-            "  %d owner(s) with a usable email across %d suburb(s) (%d owner(s) have "
-            "more than one property in this segment, collapsed to one draft each)",
+            "  %d owner-in-suburb draft(s) across %d suburb(s) (%d owner+suburb pair(s) "
+            "had more than one property in that same suburb, collapsed to one draft each; "
+            "an owner with properties in several suburbs still gets one draft per suburb)",
             len(recipients), len(suburbs), len(extra_properties),
         )
 

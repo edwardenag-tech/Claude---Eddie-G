@@ -113,21 +113,60 @@ class TestReadRecipients(unittest.TestCase):
         self.assertEqual(recipients[0].source_row, 3)  # header on row 2, data starts row 3
 
 
-class TestDedupeByOwner(unittest.TestCase):
-    def test_repeated_email_collapses_to_one(self):
-        rows = [m.Recipient(segment="s", segment_label="S", suburb="A", street="1", address="X St",
+class TestDedupeByOwnerAndSuburb(unittest.TestCase):
+    def test_same_owner_same_suburb_collapses_to_one(self):
+        rows = [m.Recipient(segment="s", segment_label="S", suburb="ARTARMON", street="1", address="X St",
                              state="NSW", postcode="2000", first_name="Bob", last_name="B",
                              email="bob@x.com", source_row=n) for n in (3, 4, 5)]
-        kept, extra = m.dedupe_by_owner(rows)
+        kept, extra = m.dedupe_by_owner_and_suburb(rows)
         self.assertEqual(len(kept), 1)
         self.assertEqual(kept[0].source_row, 3)  # first one wins
-        self.assertEqual(extra, {"bob@x.com": 2})
+        self.assertEqual(extra, {("bob@x.com", "artarmon"): 2})
+
+    def test_same_owner_different_suburbs_both_kept(self):
+        rows = [
+            m.Recipient(segment="s", segment_label="S", suburb="ARTARMON", street="1", address="X St",
+                        state="NSW", postcode="2000", first_name="Bob", last_name="B",
+                        email="bob@x.com", source_row=3),
+            m.Recipient(segment="s", segment_label="S", suburb="MOSMAN", street="2", address="Y St",
+                        state="NSW", postcode="2088", first_name="Bob", last_name="B",
+                        email="bob@x.com", source_row=4),
+        ]
+        kept, extra = m.dedupe_by_owner_and_suburb(rows)
+        self.assertEqual({r.suburb for r in kept}, {"ARTARMON", "MOSMAN"})
+        self.assertEqual(extra, {})
+
+    def test_same_owner_two_properties_in_one_suburb_and_one_in_another(self):
+        rows = [
+            m.Recipient(segment="s", segment_label="S", suburb="ARTARMON", street="1", address="X St",
+                        state="NSW", postcode="2000", first_name="Bob", last_name="B",
+                        email="bob@x.com", source_row=3),
+            m.Recipient(segment="s", segment_label="S", suburb="ARTARMON", street="2", address="Y St",
+                        state="NSW", postcode="2000", first_name="Bob", last_name="B",
+                        email="bob@x.com", source_row=4),
+            m.Recipient(segment="s", segment_label="S", suburb="MOSMAN", street="3", address="Z St",
+                        state="NSW", postcode="2088", first_name="Bob", last_name="B",
+                        email="bob@x.com", source_row=5),
+        ]
+        kept, extra = m.dedupe_by_owner_and_suburb(rows)
+        self.assertEqual(len(kept), 2)  # one per suburb
+        self.assertEqual(extra, {("bob@x.com", "artarmon"): 1})
+
+    def test_suburb_matched_case_insensitively(self):
+        rows = [
+            m.Recipient(segment="s", segment_label="S", suburb="Artarmon", street="1", address="X",
+                        state="NSW", postcode="2000", first_name="B", last_name="C", email="bob@x.com", source_row=3),
+            m.Recipient(segment="s", segment_label="S", suburb="ARTARMON", street="2", address="Y",
+                        state="NSW", postcode="2000", first_name="B", last_name="C", email="bob@x.com", source_row=4),
+        ]
+        kept, extra = m.dedupe_by_owner_and_suburb(rows)
+        self.assertEqual(len(kept), 1)
 
     def test_distinct_emails_all_kept(self):
         rows = [m.Recipient(segment="s", segment_label="S", suburb="A", street="1", address="X",
                              state="NSW", postcode="2000", first_name="B", last_name="C",
                              email=f"e{i}@x.com") for i in range(3)]
-        kept, extra = m.dedupe_by_owner(rows)
+        kept, extra = m.dedupe_by_owner_and_suburb(rows)
         self.assertEqual(len(kept), 3)
         self.assertEqual(extra, {})
 

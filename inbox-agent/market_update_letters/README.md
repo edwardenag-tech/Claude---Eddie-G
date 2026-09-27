@@ -44,10 +44,11 @@ Subject: Market update for {{suburb}}
 | `{{postcode}}`         | `2119`                           | |
 | `{{property_type}}`    | `Commercial`                     | |
 
-Each owner gets exactly one draft even if they own several properties in a
-segment — the merge fields above are for whichever property row was used to
-address the letter to them (see the status report for why, and the counts of
-how often this happens).
+An owner gets one draft per suburb they own property in, within a segment —
+several properties in the *same* suburb still collapse to one draft, but
+properties in different suburbs each get their own draft (addressed with
+that suburb's own merge fields). See the status report for real counts of
+how often owners repeat within a suburb.
 
 ## Placeholder
 
