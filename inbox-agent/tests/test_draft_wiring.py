@@ -80,12 +80,24 @@ class DraftMainCase(unittest.TestCase):
         self.outlook.send_reply.assert_not_called()
         self.assertFalse(os.path.exists(self.state_path))
 
-    def test_real_run_creates_both_drafts_and_never_sends(self):
+    def test_real_run_creates_outlook_draft_only_by_default_and_never_sends(self):
         summary = draft_agent.main(allow_auto_send=False)
         self.assertEqual(summary["drafted"], 1)
         self.m["o_draft"].assert_called_once()
-        self.m["g_draft"].assert_called_once()
+        self.m["GmailClient"].assert_not_called()
+        self.m["g_draft"].assert_not_called()
         self.outlook.send_reply.assert_not_called()
+
+    def test_gmail_copy_created_only_when_explicitly_enabled(self):
+        summary = draft_agent.main(allow_auto_send=False, gmail_copies=True)
+        self.assertEqual(summary["drafted"], 1)
+        self.m["o_draft"].assert_called_once()
+        self.m["g_draft"].assert_called_once()
+
+    def test_env_var_can_enable_gmail_copies(self):
+        with patch("draft_agent.GMAIL_COPIES_ENABLED", True):
+            draft_agent.main(allow_auto_send=False)
+        self.m["g_draft"].assert_called_once()
 
     def test_forced_draft_only_beats_auto_send_env(self):
         with patch("draft_agent.AUTO_SEND_ENABLED", True):
@@ -135,9 +147,9 @@ class DraftMainCase(unittest.TestCase):
         with self.assertRaises(anthropic.AuthenticationError):
             draft_agent.main(allow_auto_send=False)
 
-    def test_gmail_down_still_creates_outlook_draft(self):
+    def test_gmail_down_still_creates_outlook_draft_when_copies_enabled(self):
         self.m["GmailClient"].side_effect = draft_agent.GmailAuthRequired("dead")
-        summary = draft_agent.main(allow_auto_send=False)
+        summary = draft_agent.main(allow_auto_send=False, gmail_copies=True)
         self.assertEqual(summary["drafted"], 1)
         self.m["o_draft"].assert_called_once()
         self.m["g_draft"].assert_not_called()
@@ -254,6 +266,64 @@ class TestGenericDraftPrompt(unittest.TestCase):
 
     def test_confirm_placeholder_counts_as_unresolved(self):
         self.assertTrue(draft_agent._PLACEHOLDER_RE.findall("<p>Rent is [EDDIE TO CONFIRM: rent]</p>"))
+
+
+class TestQuotedThreadStripping(unittest.TestCase):
+    def test_outlook_original_message_marker_is_cut(self):
+        text = ("Hi Toby, we sold for just under 1 mil.\n\n"
+                "From: Someone Else Sent: 20 August 2026 11:34 AM To: Edward\n"
+                "Subject: Enquiry ... User Details: Name: Previous Enquirer Email: prev@x.com")
+        self.assertEqual(
+            draft_agent._strip_quoted_thread(text),
+            "Hi Toby, we sold for just under 1 mil.",
+        )
+
+    def test_gmail_style_on_wrote_marker_is_cut(self):
+        text = "Sure, happy to help.\n\nOn Mon, 1 Sep 2026 at 10:00, Prev Person <prev@x.com> wrote:\n> old question"
+        self.assertEqual(draft_agent._strip_quoted_thread(text), "Sure, happy to help.")
+
+    def test_no_marker_returns_the_whole_text(self):
+        self.assertEqual(draft_agent._strip_quoted_thread("Just a plain reply."), "Just a plain reply.")
+
+    def test_style_examples_never_carry_a_previous_enquirers_details(self):
+        outlook = MagicMock()
+        outlook._get.return_value = {"value": [{
+            "subject": "Re: Shop 1, 38 Cumberland Street",
+            "sentDateTime": "2026-08-20T00:00:00Z",
+            "body": {"content": (
+                "<p>Hi Toby, IB Property is pleased to bring to market this Property Highlights "
+                "Asking Rent listing.</p>"
+                "<p>From: Prev Enquirer &lt;prev@example.com&gt; Sent: 1 Jan 2026 To: Edward "
+                "Subject: old enquiry User Details: Phone: 0400000000</p>"
+            )},
+        }]}
+        examples = draft_agent.fetch_sent_enquiry_examples(outlook)
+        self.assertEqual(len(examples), 1)
+        self.assertNotIn("prev@example.com", examples[0])
+        self.assertNotIn("0400000000", examples[0])
+
+    def test_sent_reply_template_reuse_never_carries_a_previous_enquirers_details(self):
+        outlook = MagicMock()
+        outlook._get.return_value = {"value": [{
+            "subject": "Re: Enquiry", "sentDateTime": "2026-08-20T00:00:00Z",
+            "body": {"content": (
+                "<p>Hi Toby, we sold for just under 1 mil, price guide and floor area as discussed.</p>"
+                "<p>From: Prev Enquirer &lt;prev@example.com&gt; Sent: 1 Jan 2026 To: Edward</p>"
+            )},
+        }]}
+        template = draft_agent.fetch_sent_reply_for_address(outlook, "12 Smith Street")
+        self.assertIsNotNone(template)
+        self.assertNotIn("prev@example.com", template)
+
+
+class TestPortalLeadPrompt(unittest.TestCase):
+    def test_prompt_treats_portal_lead_comments_as_a_real_enquiry_channel(self):
+        ai = MagicMock()
+        ai.messages.create.return_value.content = [MagicMock(text='{"category":"general","asks_directly":false,"question":""}')]
+        draft_agent.claude_classify(ai, {"subject": "s", "body": "b"})
+        prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("new lead", prompt.lower())
+        self.assertIn("counts as asking Edward directly", prompt)
 
 
 class TestDraftedState(unittest.TestCase):

@@ -203,8 +203,8 @@ def run_draft_step(outlook, alerts: list, dry_run: bool = False):
         if summary["drafted"]:
             n = summary["drafted"]
             alerts.append(
-                f"{n} reply draft{'s' if n != 1 else ''} waiting for your review in Outlook/Gmail "
-                "Drafts — each answers a question sent directly to you (trial: nothing is sent automatically)."
+                f"{n} reply draft{'s' if n != 1 else ''} waiting for your review in your "
+                "Outlook Drafts — each answers a question sent directly to you (trial: nothing is sent automatically)."
             )
         if summary["failed"]:
             alerts.append(f"{summary['failed']} email(s) could not be drafted — see the run log.")

@@ -72,6 +72,10 @@ CAMPAIGN_DOC_ID = os.getenv(
 # Claude's memory).
 AUTO_SEND_ENABLED = os.getenv("AUTO_SEND_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
+# Drafts go to Outlook only by default. A Gmail copy of a reply to an IB Property
+# enquiry would send from the Gmail address, not the IB one, so it's opt-in.
+GMAIL_COPIES_ENABLED = os.getenv("DRAFT_GMAIL_COPIES", "").strip().lower() in ("1", "true", "yes")
+
 # ─── Newsletter / Automated detection ────────────────────────────────────────
 
 _FROM_NOISE = re.compile(
@@ -190,6 +194,23 @@ _LISTING_MARKERS = [
 ]
 
 
+# Where a reply ends and the quoted original begins, once HTML is flattened to
+# one line. Reused replies must be cut here: the quoted part holds the PREVIOUS
+# enquirer's name/email/phone, which must never reach a new draft.
+_QUOTED_THREAD_RE = re.compile(
+    r"-{2,}\s*Original Message\s*-{2,}"       # Outlook classic
+    r"|\bFrom:\s.{0,300}?\bSent:\s"            # Outlook header block
+    r"|\bOn\s.{5,150}?\bwrote:",               # Gmail / Apple Mail style
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_quoted_thread(plain: str) -> str:
+    """Return only the part of a sent email Eddie actually wrote."""
+    m = _QUOTED_THREAD_RE.search(plain)
+    return plain[: m.start()].strip() if m else plain.strip()
+
+
 def fetch_sent_enquiry_examples(outlook: OutlookClient) -> List[str]:
     """Return up to 5 plain-text excerpts of Eddie's listing reply emails from Sent Items."""
     params = {
@@ -205,9 +226,9 @@ def fetch_sent_enquiry_examples(outlook: OutlookClient) -> List[str]:
         body_obj = msg.get("body", {})
         raw_body = body_obj.get("content", "") if isinstance(body_obj, dict) else ""
         plain = re.sub(r"<[^>]+>", " ", raw_body)
-        plain = re.sub(r"\s{2,}", " ", plain).strip()
+        plain = _strip_quoted_thread(re.sub(r"\s{2,}", " ", plain).strip())
 
-        if any(marker in raw_body or marker in plain for marker in _LISTING_MARKERS):
+        if any(marker in plain for marker in _LISTING_MARKERS):
             subj = msg.get("subject", "")
             examples.append(f"Subject: {subj}\n{plain[:800]}")
             if len(examples) >= 5:
@@ -254,10 +275,8 @@ def fetch_sent_reply_for_address(
     logger.info("  [Sent] Found %d sent messages", len(msgs))
 
     for msg in msgs:
-        plain = _body_to_plain(msg)
-        raw_html = msg.get("body", {}).get("content", "") if isinstance(msg.get("body"), dict) else ""
-        combined = (plain + " " + raw_html).lower()
-        marker_hits = sum(1 for m in _ENQUIRY_REPLY_MARKERS if m in combined)
+        plain = _strip_quoted_thread(_body_to_plain(msg))
+        marker_hits = sum(1 for m in _ENQUIRY_REPLY_MARKERS if m in plain.lower())
         if marker_hits >= 2:
             logger.info(
                 "  [Sent] Matched reply: %s (markers=%d)",
@@ -899,7 +918,13 @@ def claude_classify(ai: anthropic.Anthropic, email: Dict) -> Tuple[str, bool, st
         "or disclaimers -- judge ONLY the sender's new text\n"
         "- An enquiry that expresses interest but asks nothing (\"I'm interested in this "
         'property") and makes no request for information or action\n'
-        "- Automated or system messages, newsletters, portal notifications and stats\n\n"
+        "- Automated or system messages, newsletters, and portal performance reports or stats "
+        "(a portal LEAD enquiry is different -- see next paragraph)\n\n"
+        "Portal and website lead emails (e.g. realcommercial / commercialrealestate \"You have "
+        "received a new lead\", web enquiry forms) relay a real person's enquiry. Judge the "
+        "enquirer's own Comments and \"I would like to\" selections: a question, or a request "
+        "for information or action (price, availability, an inspection, the IM), counts as asking "
+        "Edward directly. A lead with no comment and no request does not.\n\n"
         "Category (for choosing a reply template, independent of asks_directly):\n"
         "  lease_enquiry   — enquiry about leasing a property\n"
         "  sale_enquiry    — enquiry about buying or selling a property\n"
@@ -1297,8 +1322,10 @@ def main(
     max_emails: Optional[int] = None,
     dry_run: bool = False,
     allow_auto_send: Optional[bool] = None,
+    gmail_copies: Optional[bool] = None,
 ) -> Dict:
-    """Draft replies to urgent emails in Outlook and save them to Drafts.
+    """Draft replies to emails that ask Eddie a question directly and save them
+    to Outlook Drafts (plus Gmail Drafts only if gmail_copies / DRAFT_GMAIL_COPIES).
 
     dry_run: do everything except write -- nothing saved to Outlook/Gmail
         Drafts, nothing sent, no state recorded -- and print each draft instead.
@@ -1323,6 +1350,7 @@ def main(
     gmail_creds = os.getenv("GMAIL_CREDENTIALS_PATH", "gmail_credentials.json")
     gmail_token = os.getenv("GMAIL_TOKEN_PATH", "gmail_token.json")
     auto_send = AUTO_SEND_ENABLED if allow_auto_send is None else allow_auto_send
+    want_gmail = GMAIL_COPIES_ENABLED if gmail_copies is None else gmail_copies
 
     # Initialise clients
     logger.info("Connecting to Outlook (Microsoft Graph)...")
@@ -1332,17 +1360,20 @@ def main(
         token_cache_path=msal_cache,
     )
 
-    # Gmail is only the second copy of each draft -- a dead Gmail login must not
-    # stop the Outlook drafts.
-    logger.info("Connecting to Gmail...")
-    try:
-        gmail: Optional[GmailClient] = GmailClient(credentials_path=gmail_creds, token_path=gmail_token)
-    except GmailAuthRequired as exc:
-        logger.error(
-            "Gmail needs interactive re-consent -- Gmail drafts skipped this run "
-            "(Outlook drafts still created). Run `python agent.py --auth`: %s", exc,
-        )
-        gmail = None
+    # Gmail is only ever the optional second copy of each draft -- and a dead
+    # Gmail login must not stop the Outlook drafts.
+    gmail: Optional[GmailClient] = None
+    if want_gmail:
+        logger.info("Connecting to Gmail (Gmail draft copies enabled)...")
+        try:
+            gmail = GmailClient(credentials_path=gmail_creds, token_path=gmail_token)
+        except GmailAuthRequired as exc:
+            logger.error(
+                "Gmail needs interactive re-consent -- Gmail drafts skipped this run "
+                "(Outlook drafts still created). Run `python agent.py --auth`: %s", exc,
+            )
+    else:
+        logger.info("Gmail draft copies are off -- drafts go to Outlook only")
 
     logger.info("Connecting to Google Docs (live campaign source)...")
     try:
@@ -1539,7 +1570,7 @@ def main(
                 "  Drafted '%s' → outlook=%s gmail=%s",
                 reply_subject,
                 outlook_id or "FAILED",
-                (gmail_id or "FAILED") if gmail else "skipped (Gmail not connected)",
+                (gmail_id or "FAILED") if gmail else "n/a (Outlook only)",
             )
             state[message_key] = datetime.now().strftime("%Y-%m-%d")
             save_drafted_state(state)
