@@ -1,17 +1,27 @@
 """Market-update mail-merge agent for IB Property.
 
 Reads owner/vendor contact rows from the live Dropbox "DATA BASE.xlsx"
-workbook, segments them by region (one workbook tab per region) and suburb
-(column C, "Suburb"), and creates ONE personalised draft per owner in Outlook
-Drafts (and, only if DRAFT_GMAIL_COPIES is on, Gmail Drafts too) -- nothing is
-ever sent automatically, in this trial or otherwise, without a separate
-change to explicitly allow it.
+workbook, segments them by region (one workbook tab per region) then by
+suburb (column C, "Suburb"), and creates ONE personalised draft per owner
+PER SUBURB in Outlook Drafts (and, only if DRAFT_GMAIL_COPIES is on, Gmail
+Drafts too) -- nothing is ever sent automatically, in this trial or
+otherwise, without a separate change to explicitly allow it.
 
-This script does NOT write the letter. Eddie writes the actual content as a
-plain HTML file per region under market_update_letters/ -- see
-market_update_letters/README.md for the exact format and merge fields. This
-script only handles: reading the live recipient list, segmenting, deduping,
-merging fields into Eddie's template, and saving one draft per owner.
+Eddie's real letters are per-SUBURB, not per-region: a region like Lower
+North Shore covers dozens of suburbs, and each week Eddie supplies a
+polished, branded PDF (photos, FOR SALE/FOR LEASE/LEASED sections) for
+whichever suburbs he's actually written that week -- never all of them at
+once. This script does NOT write the letter. For each suburb Eddie wants to
+send, he drops that suburb's designed PDF under market_update_letters/ (see
+market_update_letters/README.md for the exact filename and optional
+subject/greeting override). A suburb with no PDF supplied this week is
+skipped entirely -- never sent to, never invented on Eddie's behalf. Every
+recipient's email embeds the actual designed PDF pages as images directly
+in the body (not a plain attachment).
+
+This script only handles: reading the live recipient list, segmenting,
+grouping by suburb, deduping, rendering Eddie's PDF pages as inline images,
+merging text fields, and saving one draft per owner per suburb.
 
 Usage:
     python market_update_agent.py --dry-run                       # preview every segment, nothing saved
@@ -31,14 +41,17 @@ import base64
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
+import fitz  # PyMuPDF -- rasterizes Eddie's PDF letters to inline email images
 import openpyxl
 from dotenv import load_dotenv
 
@@ -254,55 +267,129 @@ def dedupe_by_owner_and_suburb(recipients: List[Recipient]) -> "tuple[List[Recip
 # ─── Letter template ────────────────────────────────────────────────────────
 
 _NOT_WRITTEN_MARKER = "[EDDIE: WRITE THIS LETTER]"
+_PDF_RENDER_DPI = 150  # legible in an email body without bloating draft size
+
+_DEFAULT_SUBJECT_TEMPLATE = "Market update for {{suburb}}"
+_DEFAULT_GREETING_TEMPLATE = (
+    "<p>Hi {{first_name}},</p>\n"
+    "<p>Here's this week's market update for {{suburb}}.</p>"
+)
+
+
+def suburb_slug(suburb: str) -> str:
+    """Normalize a suburb name to the filename Eddie uses under
+    market_update_letters/ (lowercase, non-alphanumerics collapsed to '_').
+    Matches DATA BASE.xlsx's ALL CAPS suburbs and however Eddie happens to
+    type the filename equally well."""
+    return re.sub(r"[^a-z0-9]+", "_", suburb.strip().lower()).strip("_")
 
 
 @dataclass
 class Letter:
     subject_template: str
-    body_template: str
+    greeting_template: str
+    pdf_path: Path
 
 
-def load_letter(segment_key: str) -> Optional[Letter]:
-    """Load Eddie's letter for a segment. Returns None if it hasn't been
-    written yet (missing file, or the file still has the placeholder marker) --
-    callers must treat that as "skip this segment", never draft a generic
-    stand-in on Eddie's behalf."""
-    path = _LETTERS_DIR / f"{segment_key}.html"
-    if not path.exists():
+def load_letter(suburb: str) -> Optional[Letter]:
+    """Load Eddie's letter for one suburb. Returns None unless Eddie has
+    actually supplied a designed PDF for this suburb this week
+    (market_update_letters/<slug>.pdf) -- callers must treat that as "skip
+    this suburb", never draft a generic stand-in on Eddie's behalf. Eddie
+    writes the letter itself as that PDF (photos, branding, listings) --
+    this script only embeds its pages as images. An optional
+    market_update_letters/<slug>.html file can override the default
+    subject line and the greeting text shown above the embedded pages;
+    format is unchanged from before (a 'Subject: ...' first line, then an
+    HTML body with merge fields)."""
+    slug = suburb_slug(suburb)
+    pdf_path = _LETTERS_DIR / f"{slug}.pdf"
+    if not pdf_path.exists():
         return None
-    text = path.read_text(encoding="utf-8")
-    if _NOT_WRITTEN_MARKER in text:
-        return None
-    lines = text.splitlines()
-    if not lines or not lines[0].lower().startswith("subject:"):
-        raise WorkbookShapeError(
-            f"{path} must start with a 'Subject: ...' line -- see "
-            f"market_update_letters/README.md"
-        )
-    subject = lines[0].split(":", 1)[1].strip()
-    body = "\n".join(lines[1:]).lstrip("\n")
-    return Letter(subject_template=subject, body_template=body)
+
+    subject_template = _DEFAULT_SUBJECT_TEMPLATE
+    greeting_template = _DEFAULT_GREETING_TEMPLATE
+    html_path = _LETTERS_DIR / f"{slug}.html"
+    if html_path.exists():
+        text = html_path.read_text(encoding="utf-8")
+        if _NOT_WRITTEN_MARKER not in text:
+            lines = text.splitlines()
+            if not lines or not lines[0].lower().startswith("subject:"):
+                raise WorkbookShapeError(
+                    f"{html_path} must start with a 'Subject: ...' line -- see "
+                    f"market_update_letters/README.md"
+                )
+            subject_template = lines[0].split(":", 1)[1].strip()
+            greeting_template = "\n".join(lines[1:]).lstrip("\n")
+
+    return Letter(subject_template=subject_template, greeting_template=greeting_template, pdf_path=pdf_path)
 
 
-def render_letter(letter: Letter, recipient: Recipient) -> "tuple[str, str]":
+def render_pdf_pages(pdf_path: Path) -> List[Tuple[str, bytes, str]]:
+    """Rasterize every page of Eddie's PDF letter to a PNG, ready to embed
+    inline in the email body via Content-ID -- so the email shows the actual
+    designed page itself, not a plain attachment with a short note. Returns
+    (content_id, png_bytes, content_type) triplets in page order. Same
+    result for every recipient of a suburb, so callers render this once per
+    suburb and reuse it, not once per recipient."""
+    images: List[Tuple[str, bytes, str]] = []
+    doc = fitz.open(pdf_path)
+    try:
+        for i, page in enumerate(doc):
+            pixmap = page.get_pixmap(dpi=_PDF_RENDER_DPI)
+            cid = f"letterpage{i}.{pdf_path.stem}@marketupdate"
+            images.append((cid, pixmap.tobytes("png"), "image/png"))
+    finally:
+        doc.close()
+    return images
+
+
+def render_letter(
+    letter: Letter, recipient: Recipient, images: List[Tuple[str, bytes, str]]
+) -> "tuple[str, str]":
+    """Merge-fill the subject and greeting for one recipient, then append
+    Eddie's PDF pages (already rasterized once per suburb by
+    render_pdf_pages) as inline images referenced by cid:."""
     fields = recipient.merge_fields()
     subject = letter.subject_template
-    body = letter.body_template
+    greeting = letter.greeting_template
     for key, value in fields.items():
         token = "{{%s}}" % key
         subject = subject.replace(token, value)
-        body = body.replace(token, value)
+        greeting = greeting.replace(token, value)
+
+    img_tags = "\n".join(
+        f'<img src="cid:{cid}" alt="Market update page {i + 1}" '
+        f'style="max-width:100%; display:block; margin:0 0 8px 0;">'
+        for i, (cid, _data, _content_type) in enumerate(images)
+    )
+    body = f"{greeting}\n{img_tags}" if img_tags else greeting
     return subject, body
 
 
 # ─── Draft creation (mirrors vendor_update_agent.py's new-message drafts) ───
 
-def outlook_create_new_draft(outlook: OutlookClient, to_address: str, subject: str, html_body: str) -> Optional[str]:
+def outlook_create_new_draft(
+    outlook: OutlookClient, to_address: str, subject: str, html_body: str,
+    images: Optional[List[Tuple[str, bytes, str]]] = None,
+) -> Optional[str]:
     payload = {
         "subject": subject,
         "body": {"contentType": "HTML", "content": html_body},
         "toRecipients": [{"emailAddress": {"address": to_address}}],
     }
+    if images:
+        payload["attachments"] = [
+            {
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": f"page{i + 1}.png",
+                "contentType": content_type,
+                "contentBytes": base64.b64encode(data).decode(),
+                "isInline": True,
+                "contentId": cid,
+            }
+            for i, (cid, data, content_type) in enumerate(images)
+        ]
     result = outlook._post("/me/messages", payload)
     if result and "id" in result:
         return result["id"]
@@ -310,14 +397,25 @@ def outlook_create_new_draft(outlook: OutlookClient, to_address: str, subject: s
     return None
 
 
-def gmail_create_new_draft(gmail: GmailClient, to_address: str, subject: str, html_body: str, plain_body: str = "") -> Optional[str]:
+def gmail_create_new_draft(
+    gmail: GmailClient, to_address: str, subject: str, html_body: str, plain_body: str = "",
+    images: Optional[List[Tuple[str, bytes, str]]] = None,
+) -> Optional[str]:
     try:
-        msg = MIMEMultipart("alternative")
+        msg = MIMEMultipart("related")
         msg["To"] = to_address
         msg["Subject"] = subject
+        alt = MIMEMultipart("alternative")
         if plain_body:
-            msg.attach(MIMEText(plain_body, "plain"))
-        msg.attach(MIMEText(html_body, "html"))
+            alt.attach(MIMEText(plain_body, "plain"))
+        alt.attach(MIMEText(html_body, "html"))
+        msg.attach(alt)
+        for cid, data, content_type in (images or []):
+            _maintype, _sep, subtype = content_type.partition("/")
+            img = MIMEImage(data, _subtype=subtype or "png")
+            img.add_header("Content-ID", f"<{cid}>")
+            img.add_header("Content-Disposition", "inline")
+            msg.attach(img)
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
         result = gmail.service.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
         return result.get("id")
@@ -399,69 +497,92 @@ def run(
             continue
 
         recipients, extra_properties = dedupe_by_owner_and_suburb(recipients)
-        suburbs = sorted({r.suburb for r in recipients if r.suburb})
+        recipients = sorted(recipients, key=lambda r: (r.suburb.lower(), r.email))
+        if limit is not None:
+            recipients = recipients[:limit]
+
+        suburbs_all = sorted({r.suburb for r in recipients if r.suburb})
         logger.info(
             "  %d owner-in-suburb draft(s) across %d suburb(s) (%d owner+suburb pair(s) "
             "had more than one property in that same suburb, collapsed to one draft each; "
             "an owner with properties in several suburbs still gets one draft per suburb)",
-            len(recipients), len(suburbs), len(extra_properties),
+            len(recipients), len(suburbs_all), len(extra_properties),
         )
 
-        letter = load_letter(segment_key)
-        if letter is None:
-            logger.warning(
-                "  No letter written yet for %s (market_update_letters/%s.html) -- "
-                "skipping this segment entirely, drafting nothing.",
-                label, segment_key,
-            )
-            summary[segment_key] = {
-                "recipients": len(recipients), "suburbs": len(suburbs),
-                "drafted": 0, "skipped_no_letter": True,
-            }
-            continue
-
-        if limit is not None:
-            recipients = recipients[:limit]
+        by_suburb: Dict[str, List[Recipient]] = {}
+        for r in recipients:
+            if r.suburb:
+                by_suburb.setdefault(r.suburb, []).append(r)
 
         drafted = 0
         skipped_state = 0
+        skipped_no_letter = 0
+        suburbs_drafted: List[str] = []
+        suburbs_skipped_no_letter: List[str] = []
         previews: List[Dict] = []
-        for r in recipients:
-            state_key = f"{segment_key}:{r.email}"
-            if not dry_run and state_key in state:
-                skipped_state += 1
+
+        for suburb in sorted(by_suburb):
+            sub_recipients = by_suburb[suburb]
+            letter = load_letter(suburb)
+            if letter is None:
+                suburbs_skipped_no_letter.append(suburb)
+                skipped_no_letter += len(sub_recipients)
                 continue
+            suburbs_drafted.append(suburb)
+            images = render_pdf_pages(letter.pdf_path)  # once per suburb -- identical for every owner in it
 
-            subject, html_body = render_letter(letter, r)
-            plain_body = html_body  # Eddie's template is expected to be plain HTML; no separate plain-text source yet
+            for r in sub_recipients:
+                # Suburb is part of the key: dedupe now keeps one recipient per
+                # (owner, suburb), so an owner in two suburbs needs two
+                # independent "already drafted" records, not one shared by both.
+                state_key = f"{segment_key}:{r.email}:{suburb_slug(r.suburb)}"
+                if not dry_run and state_key in state:
+                    skipped_state += 1
+                    continue
 
-            if dry_run:
-                previews.append({
-                    "to": r.email, "suburb": r.suburb, "subject": subject,
-                    "row": r.source_row,
-                })
-                drafted += 1
-                continue
+                subject, html_body = render_letter(letter, r, images)
+                plain_body = ""  # real content is the embedded PDF pages; no separate plain-text source
 
-            outlook_id = outlook_create_new_draft(outlook, r.email, subject, html_body)
-            gmail_id = gmail_create_new_draft(gmail, r.email, subject, html_body, plain_body) if gmail else None
-            if outlook_id or gmail_id:
-                drafted += 1
-                state[state_key] = datetime.now().strftime("%Y-%m-%d")
-            else:
-                logger.warning("  Draft failed for %s (row %d)", r.email, r.source_row)
+                if dry_run:
+                    previews.append({
+                        "to": r.email, "suburb": r.suburb, "subject": subject,
+                        "row": r.source_row, "pages": len(images),
+                    })
+                    drafted += 1
+                    continue
+
+                outlook_id = outlook_create_new_draft(outlook, r.email, subject, html_body, images)
+                gmail_id = gmail_create_new_draft(gmail, r.email, subject, html_body, plain_body, images) if gmail else None
+                if outlook_id or gmail_id:
+                    drafted += 1
+                    state[state_key] = datetime.now().strftime("%Y-%m-%d")
+                else:
+                    logger.warning("  Draft failed for %s (row %d)", r.email, r.source_row)
+
+        if suburbs_skipped_no_letter:
+            logger.warning(
+                "  No letter supplied this week for %d suburb(s) in %s -- skipped, drafting "
+                "nothing for them (market_update_letters/<suburb>.pdf not found): %s",
+                len(suburbs_skipped_no_letter), label, ", ".join(suburbs_skipped_no_letter),
+            )
 
         if not dry_run:
             save_state(state)
 
         summary[segment_key] = {
-            "recipients": len(recipients), "suburbs": len(suburbs),
-            "drafted": drafted, "skipped_already_drafted": skipped_state,
+            "recipients": len(recipients),
+            "suburbs_total": len(suburbs_all),
+            "suburbs_drafted": suburbs_drafted,
+            "suburbs_skipped_no_letter": suburbs_skipped_no_letter,
+            "drafted": drafted,
+            "skipped_already_drafted": skipped_state,
+            "skipped_no_letter": skipped_no_letter,
             "previews": previews,
         }
         logger.info(
-            "  %s %d draft(s)%s", "Would create" if dry_run else "Created",
-            drafted, f", {skipped_state} already drafted in a previous run" if skipped_state else "",
+            "  %s %d draft(s) across %d suburb(s)%s", "Would create" if dry_run else "Created",
+            drafted, len(suburbs_drafted),
+            f", {skipped_state} already drafted in a previous run" if skipped_state else "",
         )
 
     missing = [k for k in ("northern_beaches", "city_fringe") if k not in SEGMENTS]
