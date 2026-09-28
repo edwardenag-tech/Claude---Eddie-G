@@ -489,6 +489,67 @@ def gmail_create_new_draft(
 # ─── Claude ───────────────────────────────────────────────────────────────────
 
 
+# Eddie's explicit, named gold standard after reviewing the first real batch
+# ("none of this bullshit... match it precisely"): 176 Victoria Street, Potts
+# Point ("Week 9 Leasing Update", sent 2026-09-28) and Suite C/154-156
+# Sailors Bay Road, Northbridge ("Week 9 Campaign Update", sent 2026-09-28) --
+# both real emails he actually sent, pulled and read verbatim (raw HTML, not
+# a lossy plain-text flatten) to derive this. Structural facts that came out
+# of that reading and are NOT how the prompt was written before:
+#   - Greeting and "hope you're well" are two separate short lines, not one
+#     combined sentence.
+#   - Section headers are their own standalone line, no colon, no bullet.
+#   - Enquiry numbers are woven into one prose sentence, never a stat block.
+#   - Named leads (when there are any) are a simple list: "Name: status."
+#   - The email ends right after "Let me know if you have any questions." --
+#     NEITHER real example has a "Thank you." after that, contrary to what
+#     this prompt previously required.
+# This is the literal structural template every draft must follow, not one
+# style example among several -- Eddie's specific complaint was that treating
+# it as "a" reference rather than "the" template produced inconsistent
+# quality across the 17.
+_LOCKED_TEMPLATE = """Hi [landlord first name(s)],
+
+[Hope all is well. / I hope you are well.] (short, own line, not merged into the greeting)
+
+[We are now in week N of the leasing/sale campaign for ADDRESS. / Please find below the week N update on the leasing/sale campaign for ADDRESS.]
+
+LISTING LINKS
+
+The listing remains active on the following platforms:
+
+[Platform name]
+[link]
+
+(repeat per platform actually known -- never invent a URL; reuse exact links from the template reference below if given, omit a platform you don't have a real link for)
+
+ENQUIRY SUMMARY
+
+[One sentence: "To date we have received N enquiries (X via the online portals and Y from our database) and conducted M inspections." -- weave the real numbers in, never a separate bolded stat block.]
+
+[Then either:
+ (a) if there are no distinctly named leads worth listing individually, one short sentence summarising the outcome, OR
+ (b) a simple list, one line per named lead: "Name: status." -- fold any real inspection (who, when) or offer (who, amount/terms) into that lead's own status line, don't invent a separate INSPECTIONS or OFFERS section]
+
+NEXT STEPS
+
+[Optional one-sentence lead-in, then either one line or a short bulleted list of concrete actions Edward will take this week.]
+
+MARKET COMMENTARY
+
+[Only include this section if there's something genuine and non-obvious to say about how the campaign is really tracking -- e.g. a slow market, not yet having a strong lead. Omit entirely rather than pad it with nothing to say.]
+
+LANDLORD REPORT
+
+The full campaign report is available here:
+
+[eagle report link, only if a real one is known -- never invent one]
+
+Let me know if you have any questions.
+
+(nothing after that line -- no "Thank you.", no name, no signature)"""
+
+
 def claude_draft_vendor_update(
     ai: anthropic.Anthropic,
     campaign: Campaign,
@@ -522,12 +583,16 @@ def claude_draft_vendor_update(
 
     property_style_example (see fetch_property_specific_style_example) is
     Eddie's own most recent real email to THIS SAME landlord, when one
-    exists -- weighted above the general style_examples because tone can
-    vary by relationship, not just be one fixed "Eddie voice". Eddie's own
-    review feedback on an earlier version of this draft was that it read
-    "very robotic" -- the instructions below exist specifically to fix
-    that: lean on his real phrasing over a generic template shape, and cut
-    the corporate filler a template naturally drifts toward.
+    exists. It is now the literal structural template, not one tone
+    reference among several: after reviewing the first real batch, Eddie
+    named two specific real emails (176 Victoria Street, Potts Point and
+    Suite C/154-156 Sailors Bay Road, Northbridge) as the exact standard
+    every draft must match -- "not just similar tone, same actual
+    structure" -- because leaving structure loose per-property produced
+    inconsistent quality. _LOCKED_TEMPLATE is the section-by-section
+    skeleton derived from reading those two real emails verbatim, used as
+    the backstop structure regardless of which property-specific example
+    (if any) is available.
 
     One Claude call returns both the drafted email AND the updated leads
     list together (as JSON), so the ledger update is grounded in the same
@@ -570,19 +635,23 @@ def claude_draft_vendor_update(
             + "\n".join(f"  - {s}" for s in inspection_offer_snippets)
         )
 
-    style_text = ""
+    style_text = f"\n\n--- REQUIRED STRUCTURE (reproduce this exactly -- see instructions below) ---\n{_LOCKED_TEMPLATE}\n--- END ---"
     if property_style_example:
         style_text += (
-            "\n\n--- MOST IMPORTANT STYLE REFERENCE: Edward's own most recent real email to THIS "
-            "SAME landlord, about THIS SAME property -- match its phrasing, rhythm and structure as "
-            "closely as you can, not just its general tone ---\n"
+            "\n\n--- THIS PROPERTY'S OWN TEMPLATE: Edward's own most recent real email to THIS SAME "
+            "landlord, about THIS SAME property. This is a real filled-in instance of the required "
+            "structure above -- follow its section choices (which ones it included/omitted), its exact "
+            "listing links and report link (reuse them verbatim, don't invent new ones), and its exact "
+            "phrasing style. Where it conflicts with the generic structure above on a wording choice, "
+            "prefer this real example; the generic structure above is the fallback for parts this "
+            "example doesn't cover ---\n"
             f"{property_style_example}\n--- END ---"
         )
     if style_examples:
         style_text += (
-            "\n\n--- SECONDARY STYLE REFERENCE: Edward's real campaign updates for other properties "
-            "(general voice only -- his exact format varies property to property, so don't copy their "
-            "structure over the primary example above) ---\n"
+            "\n\n--- OTHER PROPERTIES' REAL UPDATES (confirms the structure above is genuinely how "
+            "Edward writes these, not one property's quirk -- for voice confirmation only, don't copy "
+            "facts or property-specific details from these) ---\n"
             + "\n\n---\n".join(style_examples)
             + "\n--- END ---"
         )
@@ -612,37 +681,46 @@ def claude_draft_vendor_update(
         f"{style_text}\n\n"
         "--- INSTRUCTIONS ---\n"
         f"- The landlord's first name is: {first_name}\n"
-        "- Write the way Edward actually writes, not the way a template would. He got real feedback "
-        "on an earlier draft that it read \"very robotic\" -- professional but natural is the bar, "
-        "like a busy agent who knows this landlord, not a corporate report generator.\n"
-        "- Mirror the STYLE REFERENCE above closely: its sentence length, its rhythm, which facts it "
-        "leads with, how it opens and closes. If the reference weaves the enquiry/inspection numbers "
-        "into a normal sentence, do the same -- do NOT invent a separate bolded 'Campaign numbers to "
-        "date' stat block or similar report-style label unless the reference itself uses one.\n"
-        "- Use bolded headers and bullet lists sparingly -- only where the style reference itself uses "
-        "them for a directly comparable section. Default to flowing paragraphs, the way people actually "
-        "write to someone they know, not a templated report.\n"
+        "- Reproduce the REQUIRED STRUCTURE above exactly -- same section headers, same order, same "
+        "greeting/close shape. This is not a loose style reference, it is the literal template: "
+        "Eddie reviewed the first batch and was explicit that treating structure as optional per-"
+        "property (rather than locked) produced inconsistent quality across campaigns. Where THIS "
+        "PROPERTY'S OWN TEMPLATE exists, follow it over the generic structure for anything it covers "
+        "(section choices, exact links, exact phrasing); use the generic structure to fill in anything "
+        "it doesn't.\n"
+        "- Only include a section if you actually have real content for it. LISTING LINKS needs real "
+        "links (reuse from the property's own template above; never invent a URL). LANDLORD REPORT "
+        "needs a real report link (same rule). MARKET COMMENTARY only belongs in the email if there's "
+        "something genuine and non-obvious to say -- omit it rather than pad it with nothing.\n"
+        "- Enquiry/inspection numbers are always one woven prose sentence, never a separate bolded "
+        "stat block or a labelled count line.\n"
+        "- Named leads are a simple list, one line each: \"Name: status.\" Fold any real inspection "
+        "(who, when) or offer (who, dollar figure/terms) directly into that lead's own status line -- "
+        "never a separate INSPECTIONS or OFFERS section, and never a bare count when a real name or "
+        "figure is available in the correspondence below.\n"
         "- NEVER use padded corporate filler: not \"I hope this email finds you well\", not \"I trust "
         "this message finds you in good health\", not \"please do not hesitate to reach out\" / "
         "\"should you require any further information please do not hesitate to contact me\", not "
-        "\"I look forward to hearing from you\" as a generic close. A short, real opener like the "
-        "reference's own \"Hope all is well\" or \"I hope you are well\" is fine -- that's genuinely "
-        "how Edward writes, brief and immediately followed by substance. The difference is brevity: "
-        "if a sentence could be cut in half without losing meaning, cut it.\n"
+        "\"I look forward to hearing from you\" as a generic close. A short, real opener like \"Hope "
+        "all is well\" or \"I hope you are well\" is fine -- that's genuinely how Edward writes, on "
+        "its own short line, immediately followed by substance.\n"
         "- For named leads: reuse the known-leads list where still relevant; add a new named lead "
         "only if this week's activity actually introduces one. Do NOT invent leads, outcomes, or "
         "reasons that aren't in the activity or known-leads list above.\n"
         "- If POSSIBLE INSPECTION / OFFER CORRESPONDENCE is present above and genuinely about this "
-        "property, the email MUST name the specific inspection (who, when) and/or offer (who, dollar "
-        "figure or terms) it describes -- this is real, important news for a landlord, not a detail "
-        "to fold into a generic count. If it turns out to be about a different property, leave it out "
-        "entirely rather than mentioning it vaguely.\n"
+        "property, the relevant lead's status line MUST name the specific inspection (who, when) "
+        "and/or offer (who, dollar figure or terms) it describes -- this is real, important news for "
+        "a landlord. If it turns out to be about a different property, leave it out entirely rather "
+        "than mentioning it vaguely.\n"
         "- Email can only show correspondence Eddie was actually on -- if the CRM's enquiry count is "
         "meaningfully higher than the leads you can name, mention it in one short, plainly-worded "
-        "sentence the way Edward would actually say it out loud, not a formal disclaimer sentence, and "
-        "only if it's actually a meaningful gap worth a landlord's attention.\n"
+        "sentence the way Edward would actually say it out loud, and only if it's actually a "
+        "meaningful gap worth a landlord's attention.\n"
         "- Match Edward's direct, honest, professional tone -- he does not soften bad news.\n"
-        "- Do NOT use a formal signature block -- end with 'Thank you.' only, no name/company/email.\n\n"
+        "- End the email right after \"Let me know if you have any questions.\" (or the property's own "
+        "template's exact close line, if it differs slightly). NOTHING after that line -- no "
+        "\"Thank you.\", no name, no company, no signature block of any kind. Both of Eddie's named "
+        "gold-standard emails end exactly this way.\n\n"
         "- If you need to reason through which correspondence is genuinely about this property, do that "
         "silently -- your response must contain nothing but the JSON object itself, not your reasoning "
         "about how you got there.\n\n"
@@ -682,7 +760,7 @@ def claude_draft_vendor_update(
             f"<p>I want to give you a brief update on the campaign for {address}. "
             "The campaign is progressing and we continue to market the property "
             "across all major platforms. I will be in touch with further updates as activity develops.</p>"
-            "<p>Thank you.</p>"
+            "<p>Let me know if you have any questions.</p>"
         )
         leads = ledger_entry.known_leads  # don't lose known state just because this draft call failed
 

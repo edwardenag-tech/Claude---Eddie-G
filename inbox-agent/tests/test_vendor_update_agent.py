@@ -331,7 +331,7 @@ class TestClaudeDraftVendorUpdate(unittest.TestCase):
             ai, campaign, ledger_entry, "Sandra", [], [], [],
         )
         self.assertIn("Hi Sandra", html_body)
-        self.assertIn("Thank you.", html_body)
+        self.assertIn("Let me know if you have any questions.", html_body)
         self.assertEqual(updated.known_leads, [existing_lead])  # not lost on failure
 
     def test_model_reasoning_preamble_before_json_still_parses(self):
@@ -373,7 +373,7 @@ class TestClaudeDraftVendorUpdate(unittest.TestCase):
         m.claude_draft_vendor_update(ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [], [])
         prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
         self.assertIn("please do not hesitate to reach out", prompt.lower())
-        self.assertIn("robotic", prompt.lower())
+        self.assertIn("padded corporate filler", prompt.lower())
 
     def test_property_specific_style_example_weighted_above_general_examples(self):
         ai = self._ai(json.dumps({"html_body": "<p>x</p>", "leads": []}))
@@ -384,9 +384,9 @@ class TestClaudeDraftVendorUpdate(unittest.TestCase):
             property_style_example="Subject: 207/490 Pacific Highway - Week 5 Campaign Update\nHi Kay, real past email",
         )
         prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
-        self.assertIn("MOST IMPORTANT STYLE REFERENCE", prompt)
+        self.assertIn("THIS PROPERTY'S OWN TEMPLATE", prompt)
         self.assertIn("Hi Kay, real past email", prompt)
-        self.assertIn("SECONDARY STYLE REFERENCE", prompt)
+        self.assertIn("OTHER PROPERTIES' REAL UPDATES", prompt)
         # the property-specific example must appear before the general ones
         self.assertLess(prompt.index("Hi Kay, real past email"), prompt.index("Generic body"))
 
@@ -427,6 +427,46 @@ class TestClaudeDraftVendorUpdate(unittest.TestCase):
         self.assertNotIn("may be about a DIFFERENT property", prompt)
         self.assertNotIn("Date: 2026", prompt)
 
+    def test_locked_template_always_present_regardless_of_property_example(self):
+        # Eddie's explicit correction: this is THE template, not one example
+        # among several -- must be present even with no property-specific
+        # history to draw on.
+        ai = self._ai(json.dumps({"html_body": "<p>x</p>", "leads": []}))
+        campaign = _campaign()
+        m.claude_draft_vendor_update(
+            ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [], [],
+            property_style_example=None,
+        )
+        prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("REQUIRED STRUCTURE", prompt)
+        self.assertIn("LISTING LINKS", prompt)
+        self.assertIn("ENQUIRY SUMMARY", prompt)
+        self.assertIn("NEXT STEPS", prompt)
+        self.assertIn("LANDLORD REPORT", prompt)
+
+    def test_no_thank_you_sign_off_instructed(self):
+        # Eddie's two named gold-standard emails (176 Victoria St, Sailors
+        # Bay Rd) both end right after "Let me know if you have any
+        # questions." -- no "Thank you." Confirms the prompt no longer
+        # requires one (it used to).
+        ai = self._ai(json.dumps({"html_body": "<p>x</p>", "leads": []}))
+        campaign = _campaign()
+        m.claude_draft_vendor_update(ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [], [])
+        prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("Let me know if you have any questions", prompt)
+        self.assertIn("NOTHING after that line", prompt)
+        self.assertNotIn("end with 'Thank you.'", prompt)
+
+    def test_fallback_body_on_total_failure_has_no_thank_you(self):
+        ai = MagicMock()
+        ai.messages.create.side_effect = Exception("down")
+        campaign = _campaign()
+        _subject, html_body, _updated = m.claude_draft_vendor_update(
+            ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [], [],
+        )
+        self.assertNotIn("Thank you.", html_body)
+        self.assertIn("Let me know if you have any questions.", html_body)
+
     def test_no_property_style_example_omits_that_section(self):
         ai = self._ai(json.dumps({"html_body": "<p>x</p>", "leads": []}))
         campaign = _campaign()
@@ -435,7 +475,10 @@ class TestClaudeDraftVendorUpdate(unittest.TestCase):
             property_style_example=None,
         )
         prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
-        self.assertNotIn("MOST IMPORTANT STYLE REFERENCE", prompt)
+        # The standing instruction references this section by name regardless
+        # (so the model knows to look for it if present); what must NOT
+        # appear is the actual populated block content.
+        self.assertNotIn("--- THIS PROPERTY'S OWN TEMPLATE:", prompt)
 
 
 class TestMainOrchestration(unittest.TestCase):
