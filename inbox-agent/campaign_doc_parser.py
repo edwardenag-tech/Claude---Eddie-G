@@ -13,6 +13,7 @@ line containing only "===", each following the TEMPLATE BLOCK layout:
     - [fact]
     Price guide: [...]
     IM link: [...]
+    Listing link: [...]
     Inspections: [...]
     Special notes for the agent: [...]
     ===
@@ -32,6 +33,7 @@ _FIELD_PATTERNS = {
     "positioning":     re.compile(r"^\s*Positioning line\s*:\s*(.+)$", re.IGNORECASE),
     "price_guide":     re.compile(r"^\s*Price guide\s*:\s*(.+)$", re.IGNORECASE),
     "im_link":         re.compile(r"^\s*IM link\s*:\s*(.+)$", re.IGNORECASE),
+    "listing_link":    re.compile(r"^\s*Listing link\s*:\s*(.+)$", re.IGNORECASE),
     "inspections":     re.compile(r"^\s*Inspections\s*:\s*(.+)$", re.IGNORECASE),
     "special_notes":   re.compile(r"^\s*Special notes for the agent\s*:\s*(.+)$", re.IGNORECASE),
 }
@@ -59,7 +61,8 @@ def _clean_placeholder(value: str) -> str:
 def _parse_block(lines: List[str]) -> Dict:
     campaign: Dict = {
         "address": "", "status": "", "positioning": "", "price_guide": "",
-        "im_link": "", "inspections": "", "special_notes": "", "key_facts": [],
+        "im_link": "", "listing_link": "", "inspections": "", "special_notes": "",
+        "key_facts": [],
     }
     in_key_facts = False
 
@@ -96,7 +99,7 @@ def parse_active_campaigns(doc_text: str) -> List[Dict]:
     """Return a list of campaign dicts parsed from the doc's ACTIVE CAMPAIGNS section.
 
     Each dict has: address, status, positioning, key_facts (list), price_guide,
-    im_link, inspections, special_notes. Blocks without a non-empty "address"
+    im_link, listing_link, inspections, special_notes. Blocks without a non-empty "address"
     are dropped.
     """
     lines = doc_text.splitlines()

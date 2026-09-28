@@ -374,26 +374,88 @@ def load_listings_db() -> Dict:
         return {"listings": []}
 
 
-def find_listing_in_db(db: Dict, address: str) -> Optional[Dict]:
-    """Find the best matching listing by street number + first street-name word."""
+def _match_by_address(records: List[Dict], address: str, address_field: str = "address") -> Optional[Dict]:
+    """Find the best matching record by street number + first street-name word.
+    Shared by every address-keyed lookup here (listings_db, campaign doc,
+    listing_links) so the three sources stay consistent about what counts
+    as "the same property".
+
+    street_num and street_word are captured from a SINGLE combined regex
+    match, not two independent searches -- a suite/unit prefix before the
+    real street number (e.g. "Suite 207, 490 Pacific Highway" or the
+    realcommercial.com.au-style "207/490 Pacific Highway") previously made
+    an earlier, unrelated number win as street_num while street_word came
+    from the real street further along, so neither ever matched the same
+    property again.
+    """
     if not address:
         return None
     addr_lower = address.lower()
 
-    num_m = re.search(r'\b(\d+\w?)\b', addr_lower)
-    street_m = re.search(r'\d+\w?\s+(\w+)', addr_lower)
-    if not num_m or not street_m:
+    m = re.search(r'(\d+\w?)\s+(\w+)', addr_lower)
+    if not m:
         return None
 
-    street_num = num_m.group(1)
-    street_word = street_m.group(1)
+    street_num, street_word = m.group(1), m.group(2)
 
-    for listing in db.get("listings", []):
-        db_addr = listing.get("address", "").lower()
-        if street_num in db_addr and street_word in db_addr:
-            return listing
+    for record in records:
+        rec_addr = record.get(address_field, "").lower()
+        if street_num in rec_addr and street_word in rec_addr:
+            return record
 
     return None
+
+
+def find_listing_in_db(db: Dict, address: str) -> Optional[Dict]:
+    """Find the best matching listing by street number + first street-name word."""
+    return _match_by_address(db.get("listings", []), address)
+
+
+# ─── Branded listing links (ibproperty.com.au) ─────────────────────────────
+
+_LISTING_LINKS_PATH = os.path.join(os.path.dirname(__file__), "listing_links.json")
+
+
+def load_listing_links() -> Dict:
+    """Load listing_links.json: a small address -> branded ibproperty.com.au
+    listing-page URL map. This is the last-resort source for listing_url --
+    the live campaign doc's "Listing link:" field and listings_db.json's own
+    listing_url both outrank it (see find_listing_url). Returns an empty map
+    if the file doesn't exist yet."""
+    try:
+        with open(_LISTING_LINKS_PATH) as fh:
+            return json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"listings": []}
+
+
+def find_listing_link(links_db: Dict, address: str) -> Optional[str]:
+    match = _match_by_address(links_db.get("listings", []), address)
+    return match.get("url") if match else None
+
+
+def find_listing_url(
+    address: Optional[str],
+    campaigns: List[Dict],
+    listings_db: Dict,
+    listing_links: Dict,
+) -> Optional[str]:
+    """Resolve the branded ibproperty.com.au listing URL for an address, in
+    the same priority order as collect_property_data's other fields: live
+    campaign doc first (Eddie's most current, manually maintained source),
+    then listings_db.json, then the dedicated listing_links.json cache.
+    Returns None if nothing matches -- callers must never invent a link.
+    Computed independently of collect_property_data so it's available even
+    on the sent-template reply path, which never calls that function."""
+    if not address:
+        return None
+    campaign_match = _match_by_address(campaigns, address)
+    if campaign_match and campaign_match.get("listing_link"):
+        return campaign_match["listing_link"]
+    db_match = _match_by_address(listings_db.get("listings", []), address)
+    if db_match and db_match.get("listing_url"):
+        return db_match["listing_url"]
+    return find_listing_link(listing_links, address)
 
 
 # ─── Campaign doc (live, most-authoritative source) ────────────────────────────
@@ -414,19 +476,7 @@ def load_campaigns_from_doc(docs: Optional[DocsClient]) -> List[Dict]:
 def find_campaign_for_address(campaigns: List[Dict], address: str) -> Optional[Dict]:
     """Same street-number + street-word matching as find_listing_in_db, applied
     to campaign-doc entries instead of listings_db.json entries."""
-    if not address:
-        return None
-    addr_lower = address.lower()
-    num_m = re.search(r'\b(\d+\w?)\b', addr_lower)
-    street_m = re.search(r'\d+\w?\s+(\w+)', addr_lower)
-    if not num_m or not street_m:
-        return None
-    street_num, street_word = num_m.group(1), street_m.group(1)
-    for campaign in campaigns:
-        camp_addr = campaign.get("address", "").lower()
-        if street_num in camp_addr and street_word in camp_addr:
-            return campaign
-    return None
+    return _match_by_address(campaigns, address)
 
 
 # ─── Listing detail extraction ────────────────────────────────────────────────
@@ -730,6 +780,7 @@ def collect_property_data(
         "land_area": None,
         "property_type": None,
         "im_url": None,
+        "listing_url": None,
         "lease_summary": None,
         "vacancy_note": None,
         # shared
@@ -976,11 +1027,19 @@ def claude_draft_reply(
     listing_details: Optional[Dict] = None,
     sent_template: Optional[str] = None,
     question: Optional[str] = None,
+    listing_url: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Return (reply_subject, html_body) for a professional CRE reply.
 
     question is what the classifier found Eddie being asked; only the generic
     (non-enquiry-template) reply uses it, to answer that specifically.
+
+    listing_url is the property's branded ibproperty.com.au listing-page link
+    (see find_listing_url), when one is known -- when present, the address is
+    hyperlinked to it the first time it's mentioned; never invented when
+    absent. Used directly on the sent-template path (which has no
+    listing_details); the lease/sale template paths instead read it off
+    listing_details["listing_url"], which the caller sets to the same value.
     """
     attachments_note = ""
     if related_attachments:
@@ -991,6 +1050,15 @@ def claude_draft_reply(
     if sent_template and category in ("lease_enquiry", "sale_enquiry"):
         from_name = email.get("from_name", "").strip()
         enquirer_first = from_name.split()[0] if from_name else "there"
+        listing_link_note = ""
+        listing_link_instruction = ""
+        if listing_url:
+            listing_link_note = f"\n\n--- Listing link for this property ---\n{listing_url}"
+            listing_link_instruction = (
+                "\n(c) if the property address appears in the text, wrap it in "
+                f'<a href="{listing_url}">...</a> the first time it appears -- '
+                "nothing else changes"
+            )
         prompt = (
             "You are drafting a reply on behalf of Edward Ghattas, "
             "commercial real estate agent at IB Property Sydney.\n\n"
@@ -1000,16 +1068,19 @@ def claude_draft_reply(
             f"Body:\n{email.get('body', '')[:800]}"
             f"{attachments_note}\n\n"
             "--- Previous reply Edward sent about this property ---\n"
-            f"{sent_template[:2500]}\n\n"
+            f"{sent_template[:2500]}"
+            f"{listing_link_note}\n\n"
             "--- Instructions ---\n"
             "This is the exact email Edward sent previously about this property. "
             "Replicate it almost word for word. Only change:\n"
             f"(a) the recipient's first name to: {enquirer_first}\n"
-            "(b) any direct reference to the previous enquirer's name elsewhere in the body\n"
+            "(b) any direct reference to the previous enquirer's name elsewhere in the body"
+            f"{listing_link_instruction}\n"
             "Keep everything else identical — the property details, the tone, "
             "the structure, the sign-off.\n\n"
-            "Return ONLY the HTML body content using <p>, <strong>, and <br> tags. "
-            "Do not include a subject line inside the body."
+            "Return ONLY the HTML body content using <p>, <strong>, <br>, and (only if a "
+            "listing link was given above) <a> tags. Do not include a subject line inside "
+            "the body."
         )
         try:
             response = ai.messages.create(
@@ -1034,6 +1105,12 @@ def claude_draft_reply(
     if category == "lease_enquiry":
         ld = listing_details or {}
         address = ld.get("address") or "[PLEASE ADD - PROPERTY ADDRESS]"
+        # Hyperlink the address directly in the template text (rather than
+        # asking the model to add it) since the exact wording and position are
+        # already fixed here -- the model is only asked to reproduce this
+        # structure verbatim, so a pre-baked <a> tag survives that unchanged.
+        # Never invented: only used when a real listing_url was found.
+        address_html = f'<a href="{ld["listing_url"]}">{address}</a>' if ld.get("listing_url") else address
         building_name = ld.get("building_name")
 
         body_lower = email.get("body", "").lower()
@@ -1103,7 +1180,7 @@ def claude_draft_reply(
             "Leave any [PLEASE ADD - X] untouched:\n\n"
             "Hi [sender's first name],\n\n"
             "Hope all is well.\n\n"
-            f"IB Property is pleased to bring to market {address}, an exceptional "
+            f"IB Property is pleased to bring to market {address_html}, an exceptional "
             f"{prop_type} opportunity available for lease.\n\n"
             f"{nestled_para}"
             "**Property Highlights**\n"
@@ -1115,7 +1192,8 @@ def claude_draft_reply(
             "IB Property Sydney\n"
             "edward@ibproperty.com.au\n\n"
             "--- RENDERING INSTRUCTIONS ---\n"
-            "- Return ONLY the HTML body using <p>, <strong>, and <br> tags\n"
+            "- Return ONLY the HTML body using <p>, <strong>, <br>, and (only where the "
+            "template above already has one) <a> tags\n"
             "- Render '**Property Highlights**' as <strong>Property Highlights</strong>\n"
             "- Each bullet on its own line with a • character\n"
             "- Do not include a subject line"
@@ -1124,6 +1202,7 @@ def claude_draft_reply(
     elif category == "sale_enquiry":
         ld = listing_details or {}
         address = ld.get("address") or "[PLEASE ADD - PROPERTY ADDRESS]"
+        address_html = f'<a href="{ld["listing_url"]}">{address}</a>' if ld.get("listing_url") else address
         property_type = ld.get("property_type") or "Freehold Investment"
         suburb = ld.get("suburb") or "[SUBURB]"
 
@@ -1203,7 +1282,7 @@ def claude_draft_reply(
             "Leave any [PLEASE ADD - X] untouched:\n\n"
             "Hi [sender's first name],\n\n"
             "Hope you are well.\n\n"
-            f"IB Property is pleased to present {address}, to the market for sale via "
+            f"IB Property is pleased to present {address_html}, to the market for sale via "
             f"private treaty, an exceptional {property_type}.\n\n"
             f"{bullets_str}\n\n"
             f"{lease_para}"
@@ -1217,7 +1296,8 @@ def claude_draft_reply(
             "IB Property Sydney\n"
             "edward@ibproperty.com.au\n\n"
             "--- RENDERING INSTRUCTIONS ---\n"
-            "- Return ONLY the HTML body using <p>, <strong>, and <br> tags\n"
+            "- Return ONLY the HTML body using <p>, <strong>, <br>, and (only where the "
+            "template above already has one) <a> tags\n"
             "- Render '**Price Guide**' as <strong>Price Guide</strong>\n"
             "- Render '**Information Memorandum:**' as <strong>Information Memorandum:</strong>\n"
             "- Each bullet on its own line with a • character\n"
@@ -1397,6 +1477,12 @@ def main(
     campaigns = load_campaigns_from_doc(docs)
     logger.info("Loaded %d active campaign(s) from the live doc", len(campaigns))
 
+    # Load the branded ibproperty.com.au listing-link cache (last-resort source,
+    # see find_listing_url) -- e.g. https://ibproperty.com.au/commercial/...
+    listing_links = load_listing_links()
+    n_listing_links = len(listing_links.get("listings", []))
+    logger.info("Loaded listing_links.json: %d known listing link(s)", n_listing_links)
+
     if auto_send:
         logger.warning(
             "AUTO-SEND IS ON — enquiry replies that clear the quality bar "
@@ -1480,6 +1566,7 @@ def main(
         is_enq = category in ("lease_enquiry", "sale_enquiry")
         sent_template: Optional[str] = None
         listing_details = None
+        listing_url: Optional[str] = None
 
         if is_enq:
             # The live campaign doc outranks Sent Items: replaying an old sent
@@ -1495,12 +1582,22 @@ def main(
             else:
                 address = _extract_address(subject, email.get("body", "")[:500])
                 sent_template = fetch_sent_reply_for_address(outlook, address)
+
+            # Resolved independently of the sent-template/collect_property_data
+            # branch below so a known branded link is included either way --
+            # never invented when no source has one (find_listing_url returns
+            # None in that case).
+            listing_url = find_listing_url(doc_address, campaigns, listings_db, listing_links)
+            if listing_url:
+                logger.info("  Listing link found: %s", listing_url)
+
             if sent_template:
                 logger.info("  Using Sent Items template for reply")
             else:
                 listing_details = collect_property_data(
                     outlook, raw, email, category, listings_db=listings_db, campaigns=campaigns
                 )
+                listing_details["listing_url"] = listing_url
                 logger.info("  Property data: %s", {k: v for k, v in listing_details.items() if v})
 
         examples = sent_enquiry_examples if is_enq and not sent_template else None
@@ -1510,6 +1607,7 @@ def main(
             listing_details=listing_details,
             sent_template=sent_template,
             question=question,
+            listing_url=listing_url,
         )
         placeholders = _PLACEHOLDER_RE.findall(html_body)
         if placeholders:
