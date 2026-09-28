@@ -84,6 +84,26 @@ _AGENT_NAME_FALLBACK = "Edward Ghattas"
 # Week 7 Leasing Update".
 _PAST_UPDATE_SUBJECT_RE = re.compile(r"campaign update|leasing update|week\s*\(?\d+", re.IGNORECASE)
 
+# Eddie's review feedback: inspections and offers that really happened were
+# missing from drafts, silently folded into a generic activity summary or a
+# bare Eagle count. Checked live: Eagle's own numInspectionAttendances/
+# numOffers were 0 for every single one of his 17 active campaigns, despite
+# real inspections and a real HOA/offer negotiation confirmed in actual
+# correspondence for several of them (249 Pitt Street, 1/67 Burns Bay Road,
+# 6/895 Pacific Highway, 488 Pacific Highway) -- those events simply aren't
+# being logged into Eagle's structured Inspection/Offer records, so the CRM
+# count can't be trusted as "ground truth" for these two specific facts the
+# way numEnquiries can. This is the targeted keyword net gather_inspection_
+# and_offer_history casts, deliberately broader than campaign update/leasing
+# update subjects (it needs to match ordinary correspondence, not just
+# Eddie's own weekly emails).
+_INSPECTION_OFFER_RE = re.compile(
+    r"\binspect(ion|ing)?\b|\bwalk[- ]?through\b|\bviewing\b|"
+    r"\boffer\b|\bHOA\b|\bheads of agreement\b|\bsubmit(ted|ting)?\s+an?\s+offer\b|"
+    r"\bnegotiat\w*\b|\bterms?\s+(agreed|received|issued|signed)\b|\bdeposit\b|\bcontract of sale\b",
+    re.IGNORECASE,
+)
+
 # ─── Outlook helpers ──────────────────────────────────────────────────────────
 
 
@@ -230,6 +250,50 @@ def gather_weekly_activity(
         sent_snippets.append(f"Subject: {subj} | Date: {dt_raw[:10]} | {plain}")
 
     return inbox_snippets, sent_snippets
+
+
+def gather_inspection_and_offer_history(outlook: OutlookClient, address: str) -> List[str]:
+    """Specifically hunt for inspection-scheduling and offer/HOA/negotiation
+    correspondence for this address -- NOT restricted to the last 7 days
+    like gather_weekly_activity. An offer or an inspection that happened
+    two or three weeks ago is still live and relevant until it's actually
+    resolved, and a narrow recency window would silently drop it (this is
+    exactly what happened for 249 Pitt Street: a real HOA + a confirmed
+    inspection time from real correspondence, both older than 7 days,
+    entirely absent from the first draft). Longer per-snippet length (800
+    chars, vs 300 for general activity) since the actual date/attendee/
+    dollar figure is often past the first couple of sentences.
+
+    The address search (_short_address) isn't perfectly precise -- checked
+    live and found it can surface a different property's correspondence
+    (e.g. a generic "1 Atchison" term pulled in an unrelated Pacific
+    Highway thread). This function doesn't try to fix that at the search
+    layer; the drafting prompt is explicitly told to verify each signal is
+    actually about the right property before using it, since that judgment
+    call is exactly what the model is well-suited for and a keyword filter
+    is not.
+    """
+    short_addr = _short_address(address)
+    seen_ids: set = set()
+    hits: List[Tuple[str, str]] = []
+
+    for search_fn, date_field in ((_search_inbox, "receivedDateTime"), (_search_sent_items, "sentDateTime")):
+        for msg in search_fn(outlook, short_addr, top=30):
+            msg_id = msg.get("id")
+            if msg_id in seen_ids:
+                continue
+            subj = msg.get("subject", "")
+            if _PAST_UPDATE_SUBJECT_RE.search(subj):
+                continue  # Eddie's own past weekly updates, not raw correspondence
+            plain = _body_to_plain(msg)
+            if not _INSPECTION_OFFER_RE.search(f"{subj} {plain}"):
+                continue
+            seen_ids.add(msg_id)
+            dt_raw = msg.get(date_field, "")
+            hits.append((dt_raw, f"Subject: {subj} | Date: {dt_raw[:10]} | {plain[:800]}"))
+
+    hits.sort(key=lambda h: h[0], reverse=True)
+    return [snippet for _dt, snippet in hits[:10]]
 
 
 def fetch_style_examples(outlook: OutlookClient) -> List[str]:
@@ -416,17 +480,27 @@ def claude_draft_vendor_update(
     sent_snippets: List[str],
     style_examples: List[str],
     property_style_example: Optional[str] = None,
+    inspection_offer_snippets: Optional[List[str]] = None,
 ) -> Tuple[str, str, LedgerEntry]:
     """Return (subject, html_body, updated_ledger_entry).
 
-    Numbers (enquiries/inspections/offers/days on market) come straight from
-    Eagle -- authoritative, never re-derived from email. The narrative --
-    who's who and why -- comes from the ledger (continuity from previous
-    weeks), folded together with whatever's new in this week's email
-    activity. Email can only see portal/inbox correspondence Eddie was
-    actually on, never phone calls or other CRM-only activity, so the model
-    is told to flag that gap honestly rather than imply the leads list below
-    is the complete picture behind Eagle's enquiry count.
+    Enquiry count and days-on-market come straight from Eagle -- reliable,
+    never re-derived from email. Inspections and offers are a different
+    story: checked live and found Eagle's numInspectionAttendances/
+    numOffers sitting at 0 for every one of Eddie's 17 active campaigns,
+    despite real inspections and a real HOA negotiation confirmed in actual
+    correspondence for several of them -- those events aren't being logged
+    into Eagle's structured records, so that count can't be trusted as
+    ground truth the way the enquiry count can. inspection_offer_snippets
+    (see gather_inspection_and_offer_history) is the real source for these
+    two facts: specifically who, when, and what amount, not a bare count.
+
+    The narrative -- who's who and why -- comes from the ledger (continuity
+    from previous weeks), folded together with this week's regular email
+    activity and the inspection/offer-specific search. Email can only see
+    portal/inbox correspondence Eddie was actually on, never phone calls or
+    other CRM-only activity, so the model is told to flag that gap honestly
+    rather than imply the leads list below is the complete picture.
 
     property_style_example (see fetch_property_specific_style_example) is
     Eddie's own most recent real email to THIS SAME landlord, when one
@@ -464,6 +538,20 @@ def claude_draft_vendor_update(
     if not inbox_snippets and not sent_snippets:
         activity_block = "No new email activity found since the last update.\n\n"
 
+    inspection_offer_block = ""
+    if inspection_offer_snippets:
+        inspection_offer_block = (
+            "\n\nPOSSIBLE INSPECTION / OFFER CORRESPONDENCE (search not limited to the last 7 days -- "
+            "an offer or inspection from a few weeks ago is still live until it's actually resolved). "
+            "IMPORTANT: some of these may be about a DIFFERENT property that happens to share a street "
+            "name or number with this one -- the address search isn't perfectly precise. Read each one "
+            "and only use it if it is genuinely about THIS property; ignore and don't mention any that "
+            "aren't. For every one that IS genuinely about this property, name the SPECIFIC facts: who "
+            "(the actual name/company), when (the actual date/time if stated), and the actual dollar "
+            "figure or terms for any offer/HOA. Do not summarize this as a bare count.\n"
+            + "\n".join(f"  - {s}" for s in inspection_offer_snippets)
+        )
+
     style_text = ""
     if property_style_example:
         style_text += (
@@ -490,15 +578,19 @@ def claude_draft_vendor_update(
         f"Property: {address}\n"
         f"Listing type: {campaign.sale_or_lease or 'unknown'}\n"
         f"Week {week_number} of the campaign (from days on market, per the CRM -- ground truth)\n"
-        "CONFIRMED FROM THE CRM (ground truth -- state these accurately, never contradict or invent "
-        "a different figure): "
-        f"{_fmt(campaign.num_enquiries)} enquiries to date, "
-        f"{_fmt(campaign.num_inspection_attendances)} inspections, "
-        f"{_fmt(campaign.num_offers)} offers.\n\n"
+        f"CONFIRMED FROM THE CRM (ground truth -- state accurately, never contradict or invent a "
+        f"different figure): {_fmt(campaign.num_enquiries)} enquiries to date.\n"
+        f"CRM's own inspection/offer count ({_fmt(campaign.num_inspection_attendances)} inspections, "
+        f"{_fmt(campaign.num_offers)} offers) -- treat this as UNRELIABLE, not ground truth: it is "
+        "often 0 even when real inspections/offers happened, because they aren't always logged into "
+        "the CRM's structured records. Do NOT state this count in the email. The real source for "
+        "inspections and offers is the correspondence below -- see POSSIBLE INSPECTION / OFFER "
+        "CORRESPONDENCE if present.\n\n"
         "KNOWN LEADS AS OF LAST UPDATE (carry these forward by name; update a lead's status only if "
         "this week's activity below actually says more about them, e.g. \"as mentioned last week\"):\n"
         f"{known_leads_block}\n\n"
         f"WHAT'S NEW SINCE THE LAST UPDATE:\n{activity_block}"
+        f"{inspection_offer_block}"
         f"{style_text}\n\n"
         "--- INSTRUCTIONS ---\n"
         f"- The landlord's first name is: {first_name}\n"
@@ -522,6 +614,11 @@ def claude_draft_vendor_update(
         "- For named leads: reuse the known-leads list where still relevant; add a new named lead "
         "only if this week's activity actually introduces one. Do NOT invent leads, outcomes, or "
         "reasons that aren't in the activity or known-leads list above.\n"
+        "- If POSSIBLE INSPECTION / OFFER CORRESPONDENCE is present above and genuinely about this "
+        "property, the email MUST name the specific inspection (who, when) and/or offer (who, dollar "
+        "figure or terms) it describes -- this is real, important news for a landlord, not a detail "
+        "to fold into a generic count. If it turns out to be about a different property, leave it out "
+        "entirely rather than mentioning it vaguely.\n"
         "- Email can only show correspondence Eddie was actually on -- if the CRM's enquiry count is "
         "meaningfully higher than the leads you can name, mention it in one short, plainly-worded "
         "sentence the way Edward would actually say it out loud, not a formal disclaimer sentence, and "
@@ -700,11 +797,16 @@ def main(dry_run: bool = False) -> Dict:
                 len(inbox_snippets), len(sent_snippets),
             )
 
+            inspection_offer_snippets = gather_inspection_and_offer_history(outlook, address)
+            if inspection_offer_snippets:
+                logger.info("  Inspection/offer signal(s) found: %d", len(inspection_offer_snippets))
+
             property_style_example = fetch_property_specific_style_example(outlook, address)
 
             subject, html_body, updated_entry = claude_draft_vendor_update(
                 ai, campaign, entry, landlord_first_name, inbox_snippets, sent_snippets, style_examples,
                 property_style_example=property_style_example,
+                inspection_offer_snippets=inspection_offer_snippets,
             )
             ledger[campaign.property_id] = updated_entry
             logger.info("  Drafted: %s → To: %s", subject, landlord_email)

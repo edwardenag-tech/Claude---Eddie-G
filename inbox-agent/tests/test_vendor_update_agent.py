@@ -179,6 +179,87 @@ class TestStyleExamples(unittest.TestCase):
         self.assertNotIn("old", example)
 
 
+class TestGatherInspectionAndOfferHistory(unittest.TestCase):
+    """gather_weekly_activity alone was confirmed (by reading the code) to do
+    a generic address+7-day search with no targeting of inspection/offer
+    language at all -- this is the dedicated function that fixes that, per
+    Eddie's review: real inspections/offers were happening in correspondence
+    but not surfacing in drafts. Checked live against his real 17 campaigns:
+    Eagle's own numInspectionAttendances/numOffers were 0 for all 17 despite
+    real, confirmed inspection/HOA activity for several (249 Pitt Street,
+    1/67 Burns Bay Road, 6/895 Pacific Highway, 488 Pacific Highway) -- this
+    function is what makes that real correspondence reachable.
+    """
+
+    def test_keyword_match_required_not_just_address_match(self):
+        outlook = MagicMock()
+        outlook._get.return_value = {"value": [
+            {"id": "1", "subject": "1 Test St enquiry", "receivedDateTime": "2026-09-01T00:00:00Z",
+             "body": {"content": "<p>just asking about parking, nothing else</p>"}},
+        ]}
+        result = m.gather_inspection_and_offer_history(outlook, "1 Test St")
+        self.assertEqual(result, [])  # matches address but no inspection/offer language
+
+    def test_inspection_language_matched(self):
+        outlook = MagicMock()
+        outlook._get.side_effect = lambda endpoint, params=None: (
+            {"value": [
+                {"id": "1", "subject": "Heads of agreement - 1 Test St", "receivedDateTime": "2026-08-01T00:00:00Z",
+                 "body": {"content": "<p>Please find attached the HOA for 1 Test St, offer of $500,000</p>"}},
+            ]} if "messages" in endpoint and "sentitems" not in endpoint else {"value": []}
+        )
+        result = m.gather_inspection_and_offer_history(outlook, "1 Test St")
+        self.assertEqual(len(result), 1)
+        self.assertIn("$500,000", result[0])
+
+    def test_not_limited_to_recent_dates_unlike_gather_weekly_activity(self):
+        # A real gap this session: 249 Pitt Street's HOA was from ~2 weeks
+        # before the run and gather_weekly_activity's 7-day window missed it
+        # entirely. This function must not apply any such cutoff.
+        outlook = MagicMock()
+        old_date = "2026-01-01T00:00:00Z"  # far outside any 7-day window
+        outlook._get.side_effect = lambda endpoint, params=None: (
+            {"value": [
+                {"id": "1", "subject": "Offer - 1 Test St", "receivedDateTime": old_date,
+                 "body": {"content": "<p>Offer received: $200,000 from Jane Smith</p>"}},
+            ]} if "messages" in endpoint and "sentitems" not in endpoint else {"value": []}
+        )
+        result = m.gather_inspection_and_offer_history(outlook, "1 Test St")
+        self.assertEqual(len(result), 1)
+        self.assertIn("Jane Smith", result[0])
+
+    def test_past_weekly_update_subjects_excluded(self):
+        outlook = MagicMock()
+        outlook._get.return_value = {"value": [
+            {"id": "1", "subject": "1 Test St - Week 5 Campaign Update", "receivedDateTime": "2026-09-01T00:00:00Z",
+             "body": {"content": "<p>we conducted an inspection and received an offer</p>"}},
+        ]}
+        result = m.gather_inspection_and_offer_history(outlook, "1 Test St")
+        self.assertEqual(result, [])  # Eddie's own past update, not raw correspondence
+
+    def test_dedupes_message_seen_in_both_inbox_and_sent_search(self):
+        outlook = MagicMock()
+        shared_msg = {"id": "dup", "subject": "Offer on 1 Test St", "receivedDateTime": "2026-09-01T00:00:00Z",
+                      "sentDateTime": "2026-09-01T00:00:00Z", "body": {"content": "<p>offer of $1</p>"}}
+        outlook._get.return_value = {"value": [shared_msg]}
+        result = m.gather_inspection_and_offer_history(outlook, "1 Test St")
+        self.assertEqual(len(result), 1)
+
+    def test_snippet_length_is_longer_than_general_activity(self):
+        # gather_weekly_activity truncates to 300 chars -- key offer/inspection
+        # details are often further in, so this needs more room.
+        outlook = MagicMock()
+        long_body = "Offer details: " + ("x" * 500) + " final amount $750,000"
+        outlook._get.side_effect = lambda endpoint, params=None: (
+            {"value": [
+                {"id": "1", "subject": "Offer - 1 Test St", "receivedDateTime": "2026-09-01T00:00:00Z",
+                 "body": {"content": f"<p>{long_body}</p>"}},
+            ]} if "messages" in endpoint and "sentitems" not in endpoint else {"value": []}
+        )
+        result = m.gather_inspection_and_offer_history(outlook, "1 Test St")
+        self.assertIn("$750,000", result[0])
+
+
 class TestClaudeDraftVendorUpdate(unittest.TestCase):
     def _ai(self, text):
         ai = MagicMock()
@@ -270,6 +351,43 @@ class TestClaudeDraftVendorUpdate(unittest.TestCase):
         # the property-specific example must appear before the general ones
         self.assertLess(prompt.index("Hi Kay, real past email"), prompt.index("Generic body"))
 
+    def test_crm_inspection_offer_count_framed_as_unreliable(self):
+        ai = self._ai(json.dumps({"html_body": "<p>x</p>", "leads": []}))
+        campaign = _campaign(num_inspection_attendances=0, num_offers=0)
+        m.claude_draft_vendor_update(ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [], [])
+        prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("UNRELIABLE", prompt)
+        self.assertIn("Do NOT state this count", prompt)
+
+    def test_inspection_offer_snippets_included_and_instructed_to_name_specifics(self):
+        ai = self._ai(json.dumps({"html_body": "<p>x</p>", "leads": []}))
+        campaign = _campaign()
+        m.claude_draft_vendor_update(
+            ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [], [],
+            inspection_offer_snippets=["Subject: Offer - 1 Test St | Date: 2026-08-01 | Offer of $500,000 from Jane Smith"],
+        )
+        prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("POSSIBLE INSPECTION / OFFER CORRESPONDENCE", prompt)
+        self.assertIn("Jane Smith", prompt)
+        self.assertIn("MUST name the specific inspection", prompt)
+        self.assertIn("may be about a DIFFERENT property", prompt)
+
+    def test_no_inspection_offer_snippets_omits_that_section(self):
+        # The CRM-numbers framing always references the section by name (so
+        # the model knows where to look if it's there) -- what must NOT
+        # appear with no snippets is the actual populated block content.
+        ai = self._ai(json.dumps({"html_body": "<p>x</p>", "leads": []}))
+        campaign = _campaign()
+        m.claude_draft_vendor_update(
+            ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [], [],
+            inspection_offer_snippets=None,
+        )
+        prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
+        # The standing instruction bullet ("if present above...") is fine to
+        # always be there; the populated block itself must not be.
+        self.assertNotIn("may be about a DIFFERENT property", prompt)
+        self.assertNotIn("Date: 2026", prompt)
+
     def test_no_property_style_example_omits_that_section(self):
         ai = self._ai(json.dumps({"html_body": "<p>x</p>", "leads": []}))
         campaign = _campaign()
@@ -298,6 +416,7 @@ class TestMainOrchestration(unittest.TestCase):
             "anthropic": patch("vendor_update_agent.anthropic.Anthropic"),
             "style": patch("vendor_update_agent.fetch_style_examples", return_value=[]),
             "property_style": patch("vendor_update_agent.fetch_property_specific_style_example", return_value=None),
+            "inspection_offer": patch("vendor_update_agent.gather_inspection_and_offer_history", return_value=[]),
             "resolve_contact": patch("vendor_update_agent.resolve_landlord_contact", return_value=("owner@example.com", "Sandra")),
             "backfill": patch("vendor_update_agent.backfill_ledger_entry", return_value=LedgerEntry(address="x")),
             "activity": patch("vendor_update_agent.gather_weekly_activity", return_value=([], [])),
