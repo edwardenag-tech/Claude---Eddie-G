@@ -104,6 +104,26 @@ _INSPECTION_OFFER_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def _extract_json_object(raw: str) -> Dict:
+    """Parse a JSON object out of a Claude text response, tolerating the
+    model reasoning out loud before it despite being told not to -- confirmed
+    live: asking it to judge whether a piece of correspondence is genuinely
+    about the right property (see gather_inspection_and_offer_history) made
+    it write out that reasoning as prose before the JSON for one draft,
+    which broke a parser that assumed the whole string was clean JSON.
+    Strips code fences, then if the (fence-stripped) text still doesn't
+    start with '{', extracts the substring between the first '{' and the
+    last '}' rather than giving up."""
+    text = raw.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text).strip()
+    if text and not text.startswith("{"):
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+    return json.loads(text)
+
 # ─── Outlook helpers ──────────────────────────────────────────────────────────
 
 
@@ -391,9 +411,7 @@ def backfill_ledger_entry(outlook: OutlookClient, ai: anthropic.Anthropic, addre
             messages=[{"role": "user", "content": prompt}],
         )
         raw = response.content[0].text.strip() if response.content else ""
-        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
-        raw = re.sub(r"\s*```$", "", raw).strip()
-        data = json.loads(raw)
+        data = _extract_json_object(raw)
         sent_date = latest.get("sentDateTime", "")[:10]
         leads = [
             Lead(name=lead["name"], status=lead.get("status", ""), last_updated=sent_date)
@@ -625,7 +643,11 @@ def claude_draft_vendor_update(
         "only if it's actually a meaningful gap worth a landlord's attention.\n"
         "- Match Edward's direct, honest, professional tone -- he does not soften bad news.\n"
         "- Do NOT use a formal signature block -- end with 'Thank you.' only, no name/company/email.\n\n"
-        "Return ONLY valid JSON, no markdown fences, no other text:\n"
+        "- If you need to reason through which correspondence is genuinely about this property, do that "
+        "silently -- your response must contain nothing but the JSON object itself, not your reasoning "
+        "about how you got there.\n\n"
+        "Return ONLY valid JSON, no markdown fences, no preamble, no explanation, nothing before or "
+        "after it. The very first character of your reply must be {\n"
         '{"html_body": "<p>...</p>...", "leads": [{"name": "...", "status": "..."}]}\n'
         "\"leads\" must be the FULL current list (known leads carried forward, with any status updates, "
         "plus any genuinely new ones this week) -- not just what changed."
@@ -634,13 +656,16 @@ def claude_draft_vendor_update(
     try:
         response = ai.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=1400,
+            # Was 1400 -- raised for headroom now that inspection/offer
+            # correspondence can add real detail to write out (the actual
+            # Pymble failure diagnosed below turned out to be malformed JSON
+            # from reasoning-out-loud, not truncation, but 2200 still gives a
+            # richer draft more room either way).
+            max_tokens=2200,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = response.content[0].text.strip() if response.content else ""
-        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
-        raw = re.sub(r"\s*```$", "", raw).strip()
-        data = json.loads(raw)
+        data = _extract_json_object(raw)
         html_body = (data.get("html_body") or "").strip()
         if not html_body:
             raise ValueError("Empty html_body from Claude")

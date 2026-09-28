@@ -43,6 +43,28 @@ def _campaign(**overrides) -> Campaign:
     return Campaign(**defaults)
 
 
+class TestExtractJsonObject(unittest.TestCase):
+    """Confirmed live: asking the model to judge whether correspondence is
+    genuinely about the right property made it reason out loud in prose
+    before the JSON for one real draft (Pymble), despite being told not to
+    -- this is the parser fix so that doesn't silently produce a fallback
+    generic email."""
+
+    def test_clean_json(self):
+        self.assertEqual(m._extract_json_object('{"a": 1}'), {"a": 1})
+
+    def test_markdown_fenced_json(self):
+        self.assertEqual(m._extract_json_object('```json\n{"a": 1}\n```'), {"a": 1})
+
+    def test_prose_preamble_before_json(self):
+        raw = 'I need to carefully analyze this.\n\nHere is my answer:\n{"a": 1}'
+        self.assertEqual(m._extract_json_object(raw), {"a": 1})
+
+    def test_prose_preamble_with_fenced_json(self):
+        raw = 'Let me think through this step by step...\n\n```json\n{"a": 1, "b": "text"}\n```'
+        self.assertEqual(m._extract_json_object(raw), {"a": 1, "b": "text"})
+
+
 class TestResolveLandlordContact(unittest.TestCase):
     @patch("vendor_update_agent.find_landlord_first_name", return_value="Sandra")
     @patch("vendor_update_agent.find_landlord_email", return_value="sandra@example.com")
@@ -311,6 +333,23 @@ class TestClaudeDraftVendorUpdate(unittest.TestCase):
         self.assertIn("Hi Sandra", html_body)
         self.assertIn("Thank you.", html_body)
         self.assertEqual(updated.known_leads, [existing_lead])  # not lost on failure
+
+    def test_model_reasoning_preamble_before_json_still_parses(self):
+        # Regression test for the real Pymble failure: the model reasoned
+        # out loud about property relevance before emitting the JSON.
+        raw = (
+            'I need to carefully analyze the inspection/offer correspondence to determine '
+            'what is genuinely about this property.\n\nKey observations:\n- discard unrelated one\n\n'
+            '```json\n{"html_body": "<p>Hi Sandra,</p><p>Real content.</p><p>Thank you.</p>", '
+            '"leads": [{"name": "David Tebbutt", "status": "Reviewing"}]}\n```'
+        )
+        ai = self._ai(raw)
+        campaign = _campaign()
+        subject, html_body, updated = m.claude_draft_vendor_update(
+            ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [], [],
+        )
+        self.assertIn("Real content", html_body)
+        self.assertEqual(updated.known_leads[0].name, "David Tebbutt")
 
     def test_malformed_json_response_falls_back_gracefully(self):
         ai = self._ai("not json at all")
