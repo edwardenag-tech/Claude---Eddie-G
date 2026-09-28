@@ -18,3 +18,4 @@ venv/
 logs/
 draft_agent_state.json
 market_update_state.json
+vendor_update_ledger.json
