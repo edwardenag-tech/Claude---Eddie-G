@@ -106,23 +106,28 @@ _INSPECTION_OFFER_RE = re.compile(
 
 
 def _extract_json_object(raw: str) -> Dict:
-    """Parse a JSON object out of a Claude text response, tolerating the
-    model reasoning out loud before it despite being told not to -- confirmed
-    live: asking it to judge whether a piece of correspondence is genuinely
-    about the right property (see gather_inspection_and_offer_history) made
-    it write out that reasoning as prose before the JSON for one draft,
-    which broke a parser that assumed the whole string was clean JSON.
-    Strips code fences, then if the (fence-stripped) text still doesn't
-    start with '{', extracts the substring between the first '{' and the
-    last '}' rather than giving up."""
+    """Parse a JSON object out of a Claude text response, tolerating text
+    around it despite being told not to include any. Confirmed live, two
+    distinct failure modes from real drafts:
+      - prose BEFORE the JSON (Pymble: reasoned out loud about which
+        correspondence was genuinely about the right property before
+        answering) -- json.loads on the raw string failed immediately.
+      - content AFTER the JSON (Atchison Street: "Extra data" error --
+        valid JSON followed by something else).
+    A naive first-'{'-to-last-'}' substring grab handles the first case but
+    not reliably the second (the last '}' in the text might not be the one
+    that actually closes the JSON object if there's more structured-looking
+    text after it). json.JSONDecoder.raw_decode is the robust fix for both:
+    it parses exactly one JSON value starting at a given position and
+    reports where it ended, ignoring anything before or after."""
     text = raw.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text).strip()
-    if text and not text.startswith("{"):
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            text = text[start:end + 1]
-    return json.loads(text)
+    start = text.find("{")
+    if start == -1:
+        return json.loads(text)  # no '{' at all -- let this raise a clear error
+    obj, _end = json.JSONDecoder().raw_decode(text, start)
+    return obj
 
 # ─── Outlook helpers ──────────────────────────────────────────────────────────
 

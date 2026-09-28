@@ -64,6 +64,19 @@ class TestExtractJsonObject(unittest.TestCase):
         raw = 'Let me think through this step by step...\n\n```json\n{"a": 1, "b": "text"}\n```'
         self.assertEqual(m._extract_json_object(raw), {"a": 1, "b": "text"})
 
+    def test_trailing_content_after_json(self):
+        # Regression test for the real Atchison Street failure: "Extra data"
+        # -- valid JSON followed by something else, no leading prose this time.
+        raw = '{"a": 1}\n\nNote: I left out the unrelated thread as instructed.'
+        self.assertEqual(m._extract_json_object(raw), {"a": 1})
+
+    def test_trailing_content_that_itself_looks_like_json(self):
+        # The hardest case for a naive first-'{'-to-last-'}' substring grab:
+        # trailing text that contains its own braces would make rfind('}')
+        # pick the wrong one.
+        raw = '{"a": 1}\n\nFor reference, the excluded item was {"unrelated": "data"}.'
+        self.assertEqual(m._extract_json_object(raw), {"a": 1})
+
 
 class TestResolveLandlordContact(unittest.TestCase):
     @patch("vendor_update_agent.find_landlord_first_name", return_value="Sandra")
