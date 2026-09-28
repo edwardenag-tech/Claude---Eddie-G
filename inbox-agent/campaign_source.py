@@ -37,18 +37,36 @@ class Campaign:
     hand-entered by Eddie."""
     property_id: str  # the CRM's own internal ID
     address: str  # formatted address
-    rea_id: Optional[str] = None  # realcommercial.com.au / commercialrealestate.com.au
-    # portal Property ID, when the listing is pushed there -- this is the
-    # exact join key for matching a portal-enquiry email to this campaign,
-    # see draft_agent.py's _extract_address for the "Property ID: NNNN" /
-    # "Contacted:" subject patterns those emails use.
-    sale_or_lease: str = ""  # "SALE" | "LEASE", from the CRM's own field
+    rea_id: Optional[str] = None
+    # Eagle's own field, kept for reference/display only -- NOT a reliable
+    # join key to a portal-enquiry email's "Property ID: NNNNNN". Verified
+    # live: Suite C/154-156 Sailors Bay Road, Northbridge is a real, current,
+    # ACTIVE listing whose actual realcommercial.com.au Property ID (505195504,
+    # confirmed from a real enquiry email) does not resolve at all via
+    # `property(reaId: "505195504")` ("Property Not Found") -- Eagle stores
+    # "eagle_1817949" (its own internal id, prefixed) for that exact listing
+    # instead. Other properties in the same account carry plain numeric or
+    # "1P"-prefixed values in this field that don't match realcommercial's
+    # current 9-digit format either, so they're not a substitute source of a
+    # real portal ID. Match a portal-enquiry email to a Campaign by address
+    # instead (street number + street name, same approach as
+    # draft_agent.py's _match_by_address) -- structured, reliable, and
+    # Eagle's `street`/`streetNo`/`unit`/`postcode` fields (not yet pulled
+    # into this query) support it precisely if formattedAddress alone proves
+    # too loose in practice.
+    sale_or_lease: str = ""  # "SALE" | "LEASE" | "SALE_AND_LEASE", from the CRM's own field
     active_at: Optional[str] = None  # ISO8601 -- when the listing went live
     days_on_market: Optional[int] = None
     num_enquiries: Optional[int] = None
     num_inspection_attendances: Optional[int] = None
     num_offers: Optional[int] = None
     landlord_contacts: List[CampaignContact] = field(default_factory=list)
+    # Secondary/fallback only -- confirmed live that most properties (4 of 5
+    # in an initial ACTIVE sample) come back with an empty vendors list. The
+    # primary landlord-contact source stays vendor_update_agent.py's existing
+    # find_landlord_email/find_landlord_first_name (Sent Items search, already
+    # working -- it correctly found Sandra Odorisio for Sailors Bay Road).
+    # Only fall back to this field when that search comes up empty.
 
 
 class CampaignSource(Protocol):
