@@ -127,6 +127,58 @@ class TestBackfillLedgerEntry(unittest.TestCase):
         self.assertEqual(entry.known_leads, [])
 
 
+class TestStyleExamples(unittest.TestCase):
+    @patch("vendor_update_agent._search_sent_items")
+    def test_fetch_style_examples_merges_multiple_queries_and_dedupes(self, search):
+        # Same message surfaces under both the "campaign update" and
+        # "leasing update" queries (Graph's fuzzy $search would do this) --
+        # must not appear twice.
+        shared = {"id": "1", "subject": "1 Test St - Week 5 Campaign Update",
+                  "sentDateTime": "2026-09-01T00:00:00Z", "body": {"content": "<p>a</p>"}}
+        victoria = {"id": "2", "subject": "176 Victoria Street, Potts Point - Week 7 Leasing Update",
+                    "sentDateTime": "2026-09-14T00:00:00Z", "body": {"content": "<p>b</p>"}}
+        search.side_effect = lambda outlook, query, top=10: {
+            "campaign update": [shared],
+            "leasing update": [shared, victoria],
+            "weekly update": [],
+        }[query]
+        examples = m.fetch_style_examples(MagicMock())
+        self.assertEqual(len(examples), 2)
+        subjects = "\n".join(examples)
+        self.assertIn("Week 5 Campaign Update", subjects)
+        self.assertIn("Week 7 Leasing Update", subjects)  # would be missed by a literal "campaign update" search alone
+
+    @patch("vendor_update_agent._search_sent_items")
+    def test_fetch_style_examples_excludes_replies_and_caps_at_five(self, search):
+        msgs = [
+            {"id": str(i), "subject": f"Property {i} - Week {i} Campaign Update",
+             "sentDateTime": f"2026-09-{i:02d}T00:00:00Z", "body": {"content": f"<p>{i}</p>"}}
+            for i in range(1, 8)
+        ]
+        msgs.append({"id": "reply", "subject": "Re: Property 1 - Week 1 Campaign Update",
+                     "sentDateTime": "2026-09-10T00:00:00Z", "body": {"content": "<p>reply</p>"}})
+        search.side_effect = lambda outlook, query, top=10: msgs if query == "campaign update" else []
+        examples = m.fetch_style_examples(MagicMock())
+        self.assertEqual(len(examples), 5)
+        self.assertFalse(any("Re:" in e for e in examples))
+
+    @patch("vendor_update_agent._search_sent_items")
+    def test_property_specific_style_example_none_when_no_history(self, search):
+        search.return_value = []
+        self.assertIsNone(m.fetch_property_specific_style_example(MagicMock(), "1 New St"))
+
+    @patch("vendor_update_agent._search_sent_items")
+    def test_property_specific_style_example_returns_most_recent_for_that_address(self, search):
+        search.return_value = [
+            {"subject": "1 Test St - Week 5 Campaign Update", "sentDateTime": "2026-09-01T00:00:00Z", "body": {"content": "<p>old</p>"}},
+            {"subject": "1 Test St - Week 7 Campaign Update", "sentDateTime": "2026-09-15T00:00:00Z", "body": {"content": "<p>Hi Sandra, new content here</p>"}},
+        ]
+        example = m.fetch_property_specific_style_example(MagicMock(), "1 Test St")
+        self.assertIn("Week 7 Campaign Update", example)
+        self.assertIn("new content here", example)
+        self.assertNotIn("old", example)
+
+
 class TestClaudeDraftVendorUpdate(unittest.TestCase):
     def _ai(self, text):
         ai = MagicMock()
@@ -193,7 +245,40 @@ class TestClaudeDraftVendorUpdate(unittest.TestCase):
         campaign = _campaign()
         m.claude_draft_vendor_update(ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [], [])
         prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
-        self.assertIn("calls", prompt.lower())
+        self.assertIn("meaningfully higher", prompt.lower())
+
+    def test_no_corporate_filler_instruction_present(self):
+        ai = self._ai(json.dumps({"html_body": "<p>x</p>", "leads": []}))
+        campaign = _campaign()
+        m.claude_draft_vendor_update(ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [], [])
+        prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("please do not hesitate to reach out", prompt.lower())
+        self.assertIn("robotic", prompt.lower())
+
+    def test_property_specific_style_example_weighted_above_general_examples(self):
+        ai = self._ai(json.dumps({"html_body": "<p>x</p>", "leads": []}))
+        campaign = _campaign()
+        m.claude_draft_vendor_update(
+            ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [],
+            style_examples=["Subject: Other St Update\nGeneric body"],
+            property_style_example="Subject: 207/490 Pacific Highway - Week 5 Campaign Update\nHi Kay, real past email",
+        )
+        prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("MOST IMPORTANT STYLE REFERENCE", prompt)
+        self.assertIn("Hi Kay, real past email", prompt)
+        self.assertIn("SECONDARY STYLE REFERENCE", prompt)
+        # the property-specific example must appear before the general ones
+        self.assertLess(prompt.index("Hi Kay, real past email"), prompt.index("Generic body"))
+
+    def test_no_property_style_example_omits_that_section(self):
+        ai = self._ai(json.dumps({"html_body": "<p>x</p>", "leads": []}))
+        campaign = _campaign()
+        m.claude_draft_vendor_update(
+            ai, campaign, LedgerEntry(address=campaign.address), "Sandra", [], [], [],
+            property_style_example=None,
+        )
+        prompt = ai.messages.create.call_args.kwargs["messages"][0]["content"]
+        self.assertNotIn("MOST IMPORTANT STYLE REFERENCE", prompt)
 
 
 class TestMainOrchestration(unittest.TestCase):
@@ -212,6 +297,7 @@ class TestMainOrchestration(unittest.TestCase):
             "source_cls": patch("vendor_update_agent.EagleCampaignSource"),
             "anthropic": patch("vendor_update_agent.anthropic.Anthropic"),
             "style": patch("vendor_update_agent.fetch_style_examples", return_value=[]),
+            "property_style": patch("vendor_update_agent.fetch_property_specific_style_example", return_value=None),
             "resolve_contact": patch("vendor_update_agent.resolve_landlord_contact", return_value=("owner@example.com", "Sandra")),
             "backfill": patch("vendor_update_agent.backfill_ledger_entry", return_value=LedgerEntry(address="x")),
             "activity": patch("vendor_update_agent.gather_weekly_activity", return_value=([], [])),

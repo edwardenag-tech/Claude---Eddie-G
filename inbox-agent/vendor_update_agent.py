@@ -233,31 +233,45 @@ def gather_weekly_activity(
 
 
 def fetch_style_examples(outlook: OutlookClient) -> List[str]:
-    """Return plain-text excerpts from Eddie's recent campaign update emails (style ref)."""
-    msgs = _search_sent_items(outlook, "campaign update", top=10)
+    """Return plain-text excerpts from Eddie's recent campaign update emails
+    across ANY property (general voice reference, not property-specific --
+    see fetch_property_specific_style_example for that). Searches multiple
+    queries, not just a single quoted-phrase "campaign update" search --
+    that alone misses real subjects like "176 Victoria Street, Potts Point -
+    Week 7 Leasing Update" (no "campaign" token at all), which is exactly
+    the kind of real variety Eddie's actual voice needs to be judged against."""
+    seen_ids: set = set()
+    candidates: List[Dict] = []
+    for query in ("campaign update", "leasing update", "weekly update"):
+        for msg in _search_sent_items(outlook, query, top=10):
+            if msg.get("id") in seen_ids:
+                continue
+            if not _PAST_UPDATE_SUBJECT_RE.search(msg.get("subject", "")):
+                continue
+            if msg.get("subject", "").lower().startswith("re:"):
+                continue
+            seen_ids.add(msg.get("id"))
+            candidates.append(msg)
+
+    candidates.sort(key=lambda m: m.get("sentDateTime", ""), reverse=True)
+
     examples = []
-    for msg in msgs:
+    for msg in candidates[:5]:
         subj = msg.get("subject", "")
-        if not _PAST_UPDATE_SUBJECT_RE.search(subj):
-            continue
-        plain = _body_to_plain(msg)
-        # Trim to just the outgoing portion (before any quoted reply)
-        plain = plain[:1500]
+        plain = _body_to_plain(msg)[:1500]  # trim to the outgoing portion, before any quoted reply
         examples.append(f"Subject: {subj}\n{plain}")
-        if len(examples) >= 3:
-            break
     return examples
 
 
 # ─── Continuity ledger ─────────────────────────────────────────────────────────
 
 
-def backfill_ledger_entry(outlook: OutlookClient, ai: anthropic.Anthropic, address: str) -> LedgerEntry:
-    """Seed a new campaign's ledger entry from Eddie's own most recent past
-    weekly update email for this address, per his explicit instruction not
-    to start blank for a campaign with real history. Returns a fresh, empty
-    entry if no past update is found -- a genuinely new campaign has nothing
-    to backfill, which is correct, not a failure."""
+def _find_latest_past_update_email(outlook: OutlookClient, address: str) -> Optional[Dict]:
+    """The single most recent real weekly-update email Eddie has sent for
+    this exact address, if any -- shared by backfill_ledger_entry (parses it
+    for known leads) and fetch_property_specific_style_example (uses it
+    verbatim as the tightest possible voice match, since tone can vary
+    landlord to landlord)."""
     short_addr = _short_address(address)
     msgs = _search_sent_items(outlook, short_addr, top=20)
     candidates = [
@@ -266,9 +280,33 @@ def backfill_ledger_entry(outlook: OutlookClient, ai: anthropic.Anthropic, addre
         and not m.get("subject", "").lower().startswith("re:")
     ]
     if not candidates:
+        return None
+    return max(candidates, key=lambda m: m.get("sentDateTime", ""))
+
+
+def fetch_property_specific_style_example(outlook: OutlookClient, address: str) -> Optional[str]:
+    """Eddie's own most recent real email to THIS landlord about THIS
+    property, if one exists -- the tightest possible style match, since his
+    tone can vary by relationship, not just be one fixed "voice". None for a
+    genuinely new campaign with no history, which is correct, not a gap."""
+    msg = _find_latest_past_update_email(outlook, address)
+    if msg is None:
+        return None
+    subj = msg.get("subject", "")
+    plain = _body_to_plain(msg)[:1500]
+    return f"Subject: {subj}\n{plain}"
+
+
+def backfill_ledger_entry(outlook: OutlookClient, ai: anthropic.Anthropic, address: str) -> LedgerEntry:
+    """Seed a new campaign's ledger entry from Eddie's own most recent past
+    weekly update email for this address, per his explicit instruction not
+    to start blank for a campaign with real history. Returns a fresh, empty
+    entry if no past update is found -- a genuinely new campaign has nothing
+    to backfill, which is correct, not a failure."""
+    latest = _find_latest_past_update_email(outlook, address)
+    if latest is None:
         return LedgerEntry(address=address)
 
-    latest = max(candidates, key=lambda m: m.get("sentDateTime", ""))
     body = _body_to_plain(latest)[:3000]
 
     prompt = (
@@ -377,6 +415,7 @@ def claude_draft_vendor_update(
     inbox_snippets: List[str],
     sent_snippets: List[str],
     style_examples: List[str],
+    property_style_example: Optional[str] = None,
 ) -> Tuple[str, str, LedgerEntry]:
     """Return (subject, html_body, updated_ledger_entry).
 
@@ -388,6 +427,15 @@ def claude_draft_vendor_update(
     actually on, never phone calls or other CRM-only activity, so the model
     is told to flag that gap honestly rather than imply the leads list below
     is the complete picture behind Eagle's enquiry count.
+
+    property_style_example (see fetch_property_specific_style_example) is
+    Eddie's own most recent real email to THIS SAME landlord, when one
+    exists -- weighted above the general style_examples because tone can
+    vary by relationship, not just be one fixed "Eddie voice". Eddie's own
+    review feedback on an earlier version of this draft was that it read
+    "very robotic" -- the instructions below exist specifically to fix
+    that: lean on his real phrasing over a generic template shape, and cut
+    the corporate filler a template naturally drifts toward.
 
     One Claude call returns both the drafted email AND the updated leads
     list together (as JSON), so the ledger update is grounded in the same
@@ -417,12 +465,20 @@ def claude_draft_vendor_update(
         activity_block = "No new email activity found since the last update.\n\n"
 
     style_text = ""
+    if property_style_example:
+        style_text += (
+            "\n\n--- MOST IMPORTANT STYLE REFERENCE: Edward's own most recent real email to THIS "
+            "SAME landlord, about THIS SAME property -- match its phrasing, rhythm and structure as "
+            "closely as you can, not just its general tone ---\n"
+            f"{property_style_example}\n--- END ---"
+        )
     if style_examples:
-        style_text = (
-            "\n\n--- STYLE REFERENCE (Eddie's own real campaign updates -- match this tone, "
-            "not a single fixed template: his own format genuinely varies property to property) ---\n"
+        style_text += (
+            "\n\n--- SECONDARY STYLE REFERENCE: Edward's real campaign updates for other properties "
+            "(general voice only -- his exact format varies property to property, so don't copy their "
+            "structure over the primary example above) ---\n"
             + "\n\n---\n".join(style_examples)
-            + "\n--- END STYLE REFERENCE ---"
+            + "\n--- END ---"
         )
 
     def _fmt(n: Optional[int]) -> str:
@@ -446,16 +502,30 @@ def claude_draft_vendor_update(
         f"{style_text}\n\n"
         "--- INSTRUCTIONS ---\n"
         f"- The landlord's first name is: {first_name}\n"
-        "- Write a real weekly update in Edward's own voice and structure (see style reference) -- "
-        "not a fixed template. Cover: what's happened, what the CRM numbers above mean, and what "
-        "he'll do next.\n"
+        "- Write the way Edward actually writes, not the way a template would. He got real feedback "
+        "on an earlier draft that it read \"very robotic\" -- professional but natural is the bar, "
+        "like a busy agent who knows this landlord, not a corporate report generator.\n"
+        "- Mirror the STYLE REFERENCE above closely: its sentence length, its rhythm, which facts it "
+        "leads with, how it opens and closes. If the reference weaves the enquiry/inspection numbers "
+        "into a normal sentence, do the same -- do NOT invent a separate bolded 'Campaign numbers to "
+        "date' stat block or similar report-style label unless the reference itself uses one.\n"
+        "- Use bolded headers and bullet lists sparingly -- only where the style reference itself uses "
+        "them for a directly comparable section. Default to flowing paragraphs, the way people actually "
+        "write to someone they know, not a templated report.\n"
+        "- NEVER use padded corporate filler: not \"I hope this email finds you well\", not \"I trust "
+        "this message finds you in good health\", not \"please do not hesitate to reach out\" / "
+        "\"should you require any further information please do not hesitate to contact me\", not "
+        "\"I look forward to hearing from you\" as a generic close. A short, real opener like the "
+        "reference's own \"Hope all is well\" or \"I hope you are well\" is fine -- that's genuinely "
+        "how Edward writes, brief and immediately followed by substance. The difference is brevity: "
+        "if a sentence could be cut in half without losing meaning, cut it.\n"
         "- For named leads: reuse the known-leads list where still relevant; add a new named lead "
         "only if this week's activity actually introduces one. Do NOT invent leads, outcomes, or "
         "reasons that aren't in the activity or known-leads list above.\n"
         "- Email can only show correspondence Eddie was actually on -- if the CRM's enquiry count is "
-        "higher than the leads you can name, add one honest line noting the gap (e.g. some enquiries "
-        "came through calls/the database, not reflected in the list here) rather than implying the "
-        "list above is the complete picture.\n"
+        "meaningfully higher than the leads you can name, mention it in one short, plainly-worded "
+        "sentence the way Edward would actually say it out loud, not a formal disclaimer sentence, and "
+        "only if it's actually a meaningful gap worth a landlord's attention.\n"
         "- Match Edward's direct, honest, professional tone -- he does not soften bad news.\n"
         "- Do NOT use a formal signature block -- end with 'Thank you.' only, no name/company/email.\n\n"
         "Return ONLY valid JSON, no markdown fences, no other text:\n"
@@ -630,8 +700,11 @@ def main(dry_run: bool = False) -> Dict:
                 len(inbox_snippets), len(sent_snippets),
             )
 
+            property_style_example = fetch_property_specific_style_example(outlook, address)
+
             subject, html_body, updated_entry = claude_draft_vendor_update(
                 ai, campaign, entry, landlord_first_name, inbox_snippets, sent_snippets, style_examples,
+                property_style_example=property_style_example,
             )
             ledger[campaign.property_id] = updated_entry
             logger.info("  Drafted: %s → To: %s", subject, landlord_email)
