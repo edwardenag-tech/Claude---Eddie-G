@@ -5,6 +5,7 @@
 gmail_token.json
 msal_token_cache.json
 gmail_credentials.json
+eagle_token_cache.json
 
 # Python
 __pycache__/
