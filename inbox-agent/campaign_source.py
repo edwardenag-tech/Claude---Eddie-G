@@ -98,6 +98,7 @@ class EagleCampaignSource:
           numEnquiries
           numInspectionAttendances
           numOffers
+          agents { id name email }
           vendors {
             contact {
               firstName
@@ -113,8 +114,21 @@ class EagleCampaignSource:
     }
     """
 
-    def __init__(self, client: EagleClient):
+    def __init__(self, client: EagleClient, agent_email: str, agent_name: Optional[str] = None):
+        """agent_email is the primary filter -- there's no server-side
+        `agentId`/`agentEmail` argument on the `properties` query (checked
+        the full arg list against the live schema; it isn't there), so this
+        fetches every ACTIVE property agency-wide and filters client-side on
+        `Property.agents`, confirmed live: 17 of 252 for
+        edward@ibproperty.com.au, including both addresses Eddie's mentioned
+        this session (490 Pacific Highway, Sailors Bay Road). agent_name is
+        an exact-match (case-insensitive, whitespace-trimmed -- Eagle data
+        has at least one agent name with a stray trailing space) fallback
+        for a property whose agent record has no email populated; email is
+        preferred since names can vary (middle names, nicknames)."""
         self.client = client
+        self.agent_email = agent_email.strip().lower()
+        self.agent_name = agent_name.strip().lower() if agent_name else None
 
     def get_active_campaigns(self) -> List[Campaign]:
         campaigns: List[Campaign] = []
@@ -123,12 +137,25 @@ class EagleCampaignSource:
             data = self.client.graphql(self._QUERY, {"after": after})
             connection = data.get("properties") or {}
             for node in connection.get("nodes") or []:
-                campaigns.append(self._to_campaign(node))
+                if self._is_agents_match(node.get("agents") or []):
+                    campaigns.append(self._to_campaign(node))
             page_info = connection.get("pageInfo") or {}
             if not page_info.get("hasNextPage"):
                 break
             after = page_info.get("endCursor")
         return campaigns
+
+    def _is_agents_match(self, agents: List[Dict]) -> bool:
+        for a in agents:
+            email = (a.get("email") or "").strip().lower()
+            if email and email == self.agent_email:
+                return True
+        if self.agent_name:
+            for a in agents:
+                name = (a.get("name") or "").strip().lower()
+                if name and name == self.agent_name:
+                    return True
+        return False
 
     @staticmethod
     def _to_campaign(node: Dict) -> Campaign:
